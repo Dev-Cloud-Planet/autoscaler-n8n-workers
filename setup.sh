@@ -3,8 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# ASUME QUE SE EJECUTA DESDE EL DIRECTORIO RAÍZ DEL PROYECTO N8N
-# (donde se encuentra el 'docker-compose.yml' principal).
+# ASUME QUE SE EJECUTA DESDE EL DIRECTORIO RAÍZ DEL PROYECTO N8N.
 #
 # ==============================================================================
 
@@ -20,7 +19,6 @@ ask() {
     local prompt default reply
     prompt="$1"
     default="$2"
-    # Lee explícitamente del terminal del usuario (/dev/tty) para compatibilidad con 'curl | bash'
     read -p "$prompt (def: $default): " reply < /dev/tty
     echo "${reply:-$default}"
 }
@@ -29,7 +27,7 @@ ask() {
 check_deps() {
     echo "🔎 Verificando dependencias y entorno..."
     local missing_deps=0
-    for cmd in docker docker-compose; do
+    for cmd in docker curl wget; do
         if ! command -v $cmd &> /dev/null; then
             echo "❌ Error: El comando '$cmd' no se encuentra. Por favor, instálalo."
             missing_deps=1
@@ -37,21 +35,32 @@ check_deps() {
     done
     [[ $missing_deps -eq 1 ]] && exit 1
 
-    if ! command -v yq &> /dev/null; then
-        echo "⚠️ 'yq' no encontrado. Es necesario para modificar archivos YAML de forma segura."
-        read -p "¿Deseas instalar 'yq' (v4) ahora? (y/N): " confirm_yq < /dev/tty
-        if [[ "$confirm_yq" =~ ^[yY](es)?$ ]]; then
-            echo "📥 Instalando yq..."
-            sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
-            if ! command -v yq &> /dev/null; then echo "❌ Falló la instalación de yq." && exit 1; fi
-            echo "✅ 'yq' instalado correctamente."
-        else
-            echo "Instalación cancelada. 'yq' es requerido." && exit 1
-        fi
+    # Detectar el comando de Docker Compose a usar (v2 es preferible)
+    if command -v docker-compose &> /dev/null; then
+        COMPOSE_CMD="docker-compose"
     fi
-    echo "✅ Dependencias verificadas."
-}
+    if command -v docker &> /dev/null && docker compose version &> /dev/null; then
+        COMPOSE_CMD="docker compose"
+    fi
 
+    if [ -z "$COMPOSE_CMD" ]; then
+        echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'."
+        exit 1
+    fi
+    echo "✅ Usando '$COMPOSE_CMD' para las operaciones."
+
+    # Descargar la versión correcta de yq localmente para evitar conflictos
+    if [ ! -f ./yq ]; then
+        echo "📥 Descargando la versión correcta de 'yq' localmente..."
+        YQ_URL="https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64"
+        if ! wget -q "$YQ_URL" -O ./yq || ! chmod +x ./yq; then
+            echo "❌ Falló la descarga o configuración de yq. Verifica tu conexión a internet y permisos."
+            exit 1
+        fi
+        echo "✅ 'yq' listo para usar."
+    fi
+    YQ_CMD="./yq"
+}
 
 # --- INICIO DEL SCRIPT ---
 clear
@@ -64,15 +73,13 @@ print_header "1. Detectando Entorno del Proyecto"
 N8N_COMPOSE_PATH="$(pwd)/docker-compose.yml"
 if [ ! -f "$N8N_COMPOSE_PATH" ]; then
     echo "❌ Error: No se encontró 'docker-compose.yml' en el directorio actual."
-    echo "   Por favor, ejecuta este script desde la carpeta raíz de tu proyecto n8n."
     exit 1
 fi
 N8N_PROJECT_NAME=$(basename "$(pwd)")
 echo "✅ Proyecto n8n detectado: '$N8N_PROJECT_NAME'"
 echo "✅ Archivo a modificar: '$N8N_COMPOSE_PATH'"
 
-
-# --- RECOPILACIÓN DE DATOS (REDUCIDA) ---
+# --- RECOPILACIÓN DE DATOS ---
 print_header "2. Configuración de Conexión a Redis"
 REDIS_HOST=$(ask "Introduce el Host/IP de tu servidor Redis" "redis")
 REDIS_PORT=$(ask "Introduce el Puerto de tu servidor Redis" "6379")
@@ -80,21 +87,19 @@ REDIS_PASSWORD=$(ask "Introduce la Contraseña de Redis (opcional)" "")
 
 print_header "3. Nombres de los Servicios de n8n"
 N8N_MAIN_SERVICE_NAME=$(ask "Introduce el nombre de tu servicio principal de n8n en el YAML" "n8n")
-N8N_WORKER_SERVICE_NAME="n8n-worker" # Usamos un nombre estándar para consistencia
-
+N8N_WORKER_SERVICE_NAME="n8n-worker"
 
 # --- MODIFICACIÓN DEL DOCKER-COMPOSE DE N8N ---
 print_header "4. Preparando el Stack de n8n para Escalado"
 echo "Analizando '$N8N_COMPOSE_PATH'..."
 
-if yq e ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH" &>/dev/null; then
+if $YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH" &>/dev/null; then
     echo "✅ El servicio de worker '$N8N_WORKER_SERVICE_NAME' ya existe. Omitiendo modificación."
 else
     echo "⚠️ El servicio de worker '$N8N_WORKER_SERVICE_NAME' no existe. Se procederá a modificar el archivo."
     read -p "¿Estás de acuerdo en modificar tu 'docker-compose.yml'? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
     if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then
-        echo "Instalación cancelada."
-        exit 1
+        echo "Instalación cancelada." && exit 1
     fi
 
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"
@@ -102,21 +107,21 @@ else
     cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
 
     echo "🔧 Modificando el servicio principal '$N8N_MAIN_SERVICE_NAME'..."
-    yq e -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"EXECUTIONS_MODE\": \"queue\"}" "$N8N_COMPOSE_PATH"
-    yq e -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"EXECUTIONS_PROCESS\": \"main\"}" "$N8N_COMPOSE_PATH"
-    yq e -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_HOST\": \"$REDIS_HOST\"}" "$N8N_COMPOSE_PATH"
-    yq e -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_PORT\": \"$REDIS_PORT\"}" "$N8N_COMPOSE_PATH"
-    [ -n "$REDIS_PASSWORD" ] && yq e -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_PASSWORD\": \"$REDIS_PASSWORD\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"EXECUTIONS_MODE\": \"queue\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"EXECUTIONS_PROCESS\": \"main\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_HOST\": \"$REDIS_HOST\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_PORT\": \"$REDIS_PORT\"}" "$N8N_COMPOSE_PATH"
+    [ -n "$REDIS_PASSWORD" ] && $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_PASSWORD\": \"$REDIS_PASSWORD\"}" "$N8N_COMPOSE_PATH"
 
     echo "➕ Creando el nuevo servicio de worker '$N8N_WORKER_SERVICE_NAME'..."
-    yq e ".services.$N8N_WORKER_SERVICE_NAME = .services.$N8N_MAIN_SERVICE_NAME" -i "$N8N_COMPOSE_PATH"
-    yq e -i ".services.$N8N_WORKER_SERVICE_NAME.environment.EXECUTIONS_PROCESS = \"worker\"" "$N8N_COMPOSE_PATH"
-    yq e -i "del(.services.$N8N_WORKER_SERVICE_NAME.ports)" "$N8N_COMPOSE_PATH"
-    yq e -i ".services.$N8N_WORKER_SERVICE_NAME.restart = \"unless-stopped\"" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_WORKER_SERVICE_NAME = .services.$N8N_MAIN_SERVICE_NAME" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_WORKER_SERVICE_NAME.environment.EXECUTIONS_PROCESS = \"worker\"" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i "del(.services.$N8N_WORKER_SERVICE_NAME.ports)" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_WORKER_SERVICE_NAME.restart = \"unless-stopped\"" "$N8N_COMPOSE_PATH"
 
     echo "✅ Archivo 'docker-compose.yml' modificado con éxito."
     echo "🔄 Aplicando la nueva configuración al stack de n8n..."
-    docker-compose up -d --remove-orphans
+    $COMPOSE_CMD up -d --remove-orphans
     echo "✅ Stack de n8n actualizado."
 fi
 
@@ -134,9 +139,6 @@ echo "Creando directorio del autoscaler en './${AUTOSCALER_PROJECT_DIR}'..."
 mkdir -p "$AUTOSCALER_PROJECT_DIR"
 cd "$AUTOSCALER_PROJECT_DIR" || exit
 
-# --- Generación de Archivos para el Autoscaler ---
-# El resto del script es idéntico, ya que ahora estamos en el directorio correcto
-# para crear los archivos del autoscaler.
 echo "-> Generando archivo .env..."
 cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
@@ -203,6 +205,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN'))
 POLL_INTERVAL = 10
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+COMPOSE_CMD = "docker compose" if os.path.exists('/usr/local/bin/docker-compose') or os.path.exists('/usr/bin/docker-compose') else "docker-compose"
 try:
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD if REDIS_PASSWORD else None, decode_responses=True, socket_connect_timeout=5)
     redis_client.ping()
@@ -221,7 +224,8 @@ def send_telegram_notification(message):
         print(f"⚠️ Error al enviar notificación a Telegram: {e}")
 def run_docker_command(command):
     try:
-        full_command = f"docker-compose -p {N8N_PROJECT_NAME} {command}"
+        # Usa el comando detectado (docker compose o docker-compose)
+        full_command = f"{COMPOSE_CMD} -p {N8N_PROJECT_NAME} {command}"
         result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -271,9 +275,8 @@ if __name__ == "__main__":
             send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_")
             time.sleep(POLL_INTERVAL * 3)
 EOL
-
 echo "🚀 Desplegando el servicio de auto-escalado..."
-docker-compose up -d --build
+$COMPOSE_CMD up -d --build
 
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"
@@ -282,10 +285,12 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "Comandos útiles:"
     echo "  - Ver logs del autoscaler: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
-    echo "  - Detener el autoscaler:   cd ${AUTOSCALER_PROJECT_DIR} && docker-compose down"
-    # Volver al directorio original
+    echo "  - Detener el autoscaler:   cd ${AUTOSCALER_PROJECT_DIR} && $COMPOSE_CMD down"
     cd ..
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."
     echo "   Revisa los mensajes de error de Docker Compose más arriba."
 fi
+
+# Limpieza del binario de yq descargado
+rm -f ./yq
