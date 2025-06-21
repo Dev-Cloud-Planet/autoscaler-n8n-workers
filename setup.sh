@@ -154,7 +154,6 @@ EOL
 
 echo "-> Generando archivo docker-compose.yml..."
 cat > docker-compose.yml << EOL
-version: '3.8'
 services:
   autoscaler:
     build: .
@@ -165,6 +164,14 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/local/bin/docker-compose:/usr/local/bin/docker-compose:ro
       - /usr/bin/docker-compose:/usr/bin/docker-compose:ro
+    network:
+      - n8n_network
+    depends_on:
+      - redis
+networks:
+  n8n_network: 
+    name: n8n_default 
+    external: true
 EOL
 
 echo "-> Generando archivo Dockerfile..."
