@@ -6,7 +6,6 @@
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
-
 print_header() {
     echo -e "\n\033[1;34m=================================================\033[0m"
     echo -e "\033[1;34m  $1\033[0m"
@@ -38,8 +37,7 @@ check_deps() {
     elif command -v docker-compose &> /dev/null; then
         COMPOSE_CMD="docker-compose"
     else
-        echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'."
-        exit 1
+        echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'." && exit 1
     fi
     echo "✅ Usando '$COMPOSE_CMD' para las operaciones."
 
@@ -58,6 +56,72 @@ check_deps() {
 clear
 check_deps
 
+print_header "Instalador del Servicio de Auto-Escalado para n8n"
+
+# --- DETECCIÓN DE CONTEXTO ---
+print_header "1. Detectando Entorno del Proyecto"
+N8N_COMPOSE_PATH="$(pwd)/docker-compose.yml"
+if [ ! -f "$N8N_COMPOSE_PATH" ]; then
+    echo "❌ Error: No se encontró 'docker-compose.yml' en el directorio actual."
+    exit 1
+fi
+
+# ¡NUEVO! Sanitización del nombre del proyecto
+RAW_PROJECT_NAME=$(basename "$(pwd)")
+N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9-]//g')
+
+if [ -z "$N8N_PROJECT_NAME" ]; then
+    N8N_PROJECT_NAME="n8n-project"
+fi
+
+echo "✅ Proyecto n8n detectado y sanitizado como: '$N8N_PROJECT_NAME'"
+echo "✅ Archivo a modificar: '$N8N_COMPOSE_PATH'"
+
+# --- RECOPILACIÓN DE DATOS ---
+print_header "2. Configuración de Conexión a Redis"
+REDIS_HOST=$(ask "Introduce el Host/IP de tu servidor Redis" "redis")
+REDIS_PORT=$(ask "Introduce el Puerto de tu servidor Redis" "6379")
+REDIS_PASSWORD=$(ask "Introduce la Contraseña de Redis (opcional)" "")
+
+print_header "3. Nombres de los Servicios de n8n"
+N8N_MAIN_SERVICE_NAME=$(ask "Introduce el nombre de tu servicio principal de n8n en el YAML" "n8n")
+N8N_WORKER_SERVICE_NAME="n8n-worker"
+
+# --- MODIFICACIÓN DEL DOCKER-COMPOSE DE N8N ---
+print_header "4. Preparando el Stack de n8n para Escalado"
+echo "Analizando '$N8N_COMPOSE_PATH'..."
+
+if $YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH" &>/dev/null; then
+    echo "✅ El servicio de worker '$N8N_WORKER_SERVICE_NAME' ya existe. Omitiendo modificación."
+else
+    echo "⚠️ El servicio de worker '$N8N_WORKER_SERVICE_NAME' no existe. Se procederá a modificar el archivo."
+    read -p "¿Estás de acuerdo en modificar tu 'docker-compose.yml'? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
+    if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then
+        echo "Instalación cancelada." && exit 1
+    fi
+
+    BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"
+    echo "🛡️ Creando copia de seguridad en '$BACKUP_FILE'..."
+    cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
+
+    echo "🔧 Modificando el servicio principal '$N8N_MAIN_SERVICE_NAME'..."
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"EXECUTIONS_MODE\": \"queue\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"EXECUTIONS_PROCESS\": \"main\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_HOST\": \"$REDIS_HOST\"}" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_PORT\": \"$REDIS_PORT\"}" "$N8N_COMPOSE_PATH"
+    [ -n "$REDIS_PASSWORD" ] && $YQ_CMD eval -i ".services.$N8N_MAIN_SERVICE_NAME.environment += {\"QUEUE_BULL_REDIS_PASSWORD\": \"$REDIS_PASSWORD\"}" "$N8N_COMPOSE_PATH"
+
+    echo "➕ Creando el nuevo servicio de worker '$N8N_WORKER_SERVICE_NAME'..."
+    $YQ_CMD eval -i ".services.$N8N_WORKER_SERVICE_NAME = .services.$N8N_MAIN_SERVICE_NAME" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_WORKER_SERVICE_NAME.environment.EXECUTIONS_PROCESS = \"worker\"" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i "del(.services.$N8N_WORKER_SERVICE_NAME.ports)" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.$N8N_WORKER_SERVICE_NAME.restart = \"unless-stopped\"" "$N8N_COMPOSE_PATH"
+
+    echo "✅ Archivo 'docker-compose.yml' modificado con éxito."
+    echo "🔄 Aplicando la nueva configuración al stack de n8n..."
+    $COMPOSE_CMD up -d --remove-orphans
+    echo "✅ Stack de n8n actualizado."
+fi
 
 # --- DESPLIEGUE DEL AUTOSCALER ---
 print_header "5. Desplegando el Servicio de Auto-Escalado"
@@ -122,7 +186,7 @@ EOL
 
 echo "-> Generando archivo autoscaler.py..."
 cat > autoscaler.py << 'EOL'
-import os, time, subprocess, redis, requests
+import os, time, subprocess, redis, requests, shutil
 from dotenv import load_dotenv
 load_dotenv()
 REDIS_HOST = os.getenv('REDIS_HOST')
@@ -153,7 +217,6 @@ def send_telegram_notification(message):
     payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
     try:
         requests.post(url, json=payload, timeout=10).raise_for_status()
-        print(f"✔️ Notificación enviada: {message}")
     except requests.exceptions.RequestException as e:
         print(f"⚠️ Error al enviar notificación a Telegram: {e}")
 def run_docker_command(command):
@@ -172,14 +235,12 @@ def get_running_workers():
 def scale_workers(desired_count):
     current_workers = get_running_workers()
     if current_workers == -1 or current_workers == desired_count: return
-    print(f"⚖️ Escalando workers de {current_workers} a {desired_count}...")
     command = f"up -d --scale {N8N_WORKER_SERVICE_NAME}={desired_count} --no-recreate --remove-orphans"
     if run_docker_command(command) is not None:
         send_telegram_notification(f"✅ Auto-escalado. *Workers activos: {desired_count}*")
     else:
         send_telegram_notification(f"❌ *Error al escalar workers a {desired_count}*")
 if __name__ == "__main__":
-    import shutil
     send_telegram_notification(f"🤖 El servicio de auto-escalado para *{N8N_PROJECT_NAME}* ha sido iniciado.")
     idle_since = None
     while True:
@@ -203,7 +264,7 @@ if __name__ == "__main__":
             print(f"⚠️ Error de Redis: {e}. Reintentando...")
             time.sleep(POLL_INTERVAL * 2)
         except KeyboardInterrupt:
-            send_telegram_notification(f"🤖 Servicio de auto-escalado para *{N8N_PROJECT_NAME}* detenido."); break
+            send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
         except Exception as e:
             print(f"🔥 Error inesperado: {e}")
             send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_")
@@ -218,7 +279,7 @@ $COMPOSE_CMD up -d --build
 
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"
-    echo "El servicio de auto-escalado está en funcionamiento."
+    echo "Tu stack de n8n ha sido configurado y el servicio de auto-escalado está en funcionamiento."
     echo ""
     echo "Comandos útiles:"
     echo "  - Ver logs del autoscaler: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
@@ -226,8 +287,7 @@ if [ $? -eq 0 ]; then
     cd ..
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."
-    echo "   Revisa los mensajes de error de Docker Compose más arriba."
+    echo "   Revisa los mensajes de error."
 fi
 
-# Limpieza del binario de yq descargado
 rm -f ./yq
