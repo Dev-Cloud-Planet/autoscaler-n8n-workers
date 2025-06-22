@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.9 
+# Versión 10.0 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -84,43 +84,56 @@ else
     read -p "¿Estás de acuerdo en modificar 'docker-compose.yml' para añadir workers? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
     if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then echo "Instalación cancelada." && exit 1; fi
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
-    echo "🔧 Modificando el stack de n8n paso a paso..."
+    echo "🔧 Modificando el stack de n8n en una operación atómica..."
     
-    $YQ_CMD eval -i '.services."'"$N8N_MAIN_SERVICE_NAME"'".environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=main", "QUEUE_BULL_REDIS_HOST='"$REDIS_HOST"'"]' "$N8N_COMPOSE_PATH"
-    echo "✅ OK: Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
-
-    # CORRECCIÓN FINAL: Usar un archivo temporal para evitar conflictos con yq -i y la tubería.
-    YQ_WORKER_SCRIPT="
-      .services.\"${N8N_WORKER_SERVICE_NAME}\" = .services.\"${N8N_MAIN_SERVICE_NAME}\" |
-      .services.\"${N8N_WORKER_SERVICE_NAME}\" |= (
-        del(.ports) |
-        del(.labels) |
-        del(.depends_on) |
-        .container_name = \"${N8N_PROJECT_NAME}_worker\" |
-        .restart = \"unless-stopped\" |
-        .environment |= map(
-          if . == \"EXECUTIONS_PROCESS=main\" 
-          then \"EXECUTIONS_PROCESS=worker\"
-          else . end
+    # CORRECCIÓN FINAL: Usar un único script atómico para yq y un archivo temporal.
+    # Esto es el método más robusto para evitar todos los problemas de comillas y de estado intermedio.
+    YQ_ATOMIC_SCRIPT="
+      # 1. Modifica el servicio principal para añadir las variables de entorno del modo queue.
+      (
+        .services.\"${N8N_MAIN_SERVICE_NAME}\".environment += [
+          \"EXECUTIONS_MODE=queue\", 
+          \"EXECUTIONS_PROCESS=main\", 
+          \"QUEUE_BULL_REDIS_HOST=${REDIS_HOST}\"
+        ]
+      ) |
+      # 2. Usa el resultado anterior para crear y modificar el servicio worker.
+      (
+        .services.\"${N8N_WORKER_SERVICE_NAME}\" = .services.\"${N8N_MAIN_SERVICE_NAME}\" |
+        .services.\"${N8N_WORKER_SERVICE_NAME}\" |= (
+          del(.ports) |
+          del(.labels) |
+          del(.depends_on) |
+          .container_name = \"${N8N_PROJECT_NAME}_worker\" |
+          .restart = \"unless-stopped\" |
+          .environment |= map(
+            if . == \"EXECUTIONS_PROCESS=main\" then \"EXECUTIONS_PROCESS=worker\" else . end
+          )
         )
       )
     "
     TMP_FILE=$(mktemp)
-    echo "$YQ_WORKER_SCRIPT" | $YQ_CMD eval - "$N8N_COMPOSE_PATH" > "$TMP_FILE"
+    # Aplica el script atómico al archivo original y guarda el resultado en el archivo temporal.
+    "$YQ_CMD" eval "$YQ_ATOMIC_SCRIPT" "$N8N_COMPOSE_PATH" > "$TMP_FILE"
+
     if [ $? -ne 0 ]; then
-        echo "❌ ERROR: El comando yq para procesar la creación del worker falló."
+        echo "❌ ERROR: El comando yq para procesar la modificación falló."
+        rm -f "$TMP_FILE" # Limpia el archivo temporal
+        restore_and_exit
+    fi
+    
+    # Verificación final antes de mover el archivo
+    verification_output=$($YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$TMP_FILE")
+    if [ "$verification_output" != "true" ]; then
+        echo "❌ ERROR FATAL: La modificación produjo un archivo inválido. No se pudo encontrar el worker."
         rm -f "$TMP_FILE"
         restore_and_exit
     fi
+    
+    # Si todo ha ido bien, reemplaza el archivo original con el modificado.
     mv "$TMP_FILE" "$N8N_COMPOSE_PATH"
-    verification_output=$($YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH")
-    if [ "$verification_output" != "true" ]; then
-        echo "❌ ERROR FATAL: La verificación falló, no se pudo crear el servicio worker en el archivo."
-        restore_and_exit
-    fi
-    echo "✅ OK: Añadido y configurado el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
+    echo "✅ OK: Archivo 'docker-compose.yml' modificado y verificado con éxito."
         
-    echo ""; echo "✅ ¡Éxito! Tu archivo 'docker-compose.yml' ha sido modificado y verificado."
     echo "🔄 Aplicando la nueva configuración a tu stack de n8n..."; $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
     echo "✅ Tu stack de n8n ha sido actualizado y ahora está listo para escalar."
 fi
