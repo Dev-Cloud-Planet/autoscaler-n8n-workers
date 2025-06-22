@@ -3,12 +3,17 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n
 #
-# Versión 10.2
+# Versión 10.3
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
 print_header() { echo -e "\n\033[1;34m=================================================\033[0m\n\033[1;34m  $1\033[0m\n\033[1;34m=================================================\033[0m\n"; }
-ask() { read -p "$1 (def: $2): " reply < /dev/tty; echo "${reply:-$default}"; }
+ask() { 
+    local prompt="$1"
+    local default="$2"
+    read -p "$prompt (def: $default): " reply < /dev/tty
+    echo "${reply:-$default}"
+}
 run_and_verify() {
     local modification_cmd=$1
     local verification_cmd=$2
@@ -60,12 +65,36 @@ if [ ! -f "$N8N_COMPOSE_PATH" ]; then echo "❌ Error: No se encontró 'docker-c
 RAW_PROJECT_NAME=$(basename "$(pwd)"); N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9-]//g')
 if [ -z "$N8N_PROJECT_NAME" ]; then N8N_PROJECT_NAME="n8n-project"; fi
 echo "✅ Proyecto n8n detectado como: '$N8N_PROJECT_NAME'"
-N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "n8nio/n8n*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
-N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN_SERVICE_NAME:-n8n}")
-N8N_WORKER_SERVICE_NAME="n8n-worker"
-NETWORK_KEY=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks | keys | .[0]" "$N8N_COMPOSE_PATH"if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
+
+# Detección mejorada del servicio principal
+N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '.services | to_entries | .[] | select(.value.image | test("n8nio/n8n")) | .key' "$N8N_COMPOSE_PATH" | head -n 1)
+
+# Validación y pregunta al usuario
+if [ -z "$N8N_MAIN_SERVICE_NAME" ]; then
+    echo "⚠️ No se detectó automáticamente el servicio de n8n"
+    N8N_MAIN_SERVICE_NAME=$(ask "Introduce manualmente el nombre de tu servicio principal de n8n" "n8n")
+else
+    N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "$N8N_MAIN_SERVICE_NAME")
+fi
+
+# Verificación crítica
+if [ -z "$N8N_MAIN_SERVICE_NAME" ]; then
+    echo "❌ Error: El nombre del servicio no puede estar vacío"
+    exit 1
+fi
+
+# Detección de la red (mejorada)
+NETWORK_KEY=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks | keys | .[0]" "$N8N_COMPOSE_PATH")
+if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then
+    # Intentar de otra manera: si no es un objeto, puede ser una lista simple
+    NETWORK_KEY=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
+    if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then
+        echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'."
+        exit 1
+    fi
+fi
 echo "✅ Red de Docker detectada: '$NETWORK_KEY'"
-REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
+REDIS_SERVICE_NAME=$($YQ_CMD eval '.services | to_entries | .[] | select(.value.image | test("redis")) | .key' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
 # --- FASE 2: MODIFICACIÓN SEGURA DEL DOCKER-COMPOSE ---
