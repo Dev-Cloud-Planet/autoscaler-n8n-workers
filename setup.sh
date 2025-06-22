@@ -110,19 +110,19 @@ else
 
     # CORRECCIÓN: Método robusto usando STDIN para evitar problemas de comillas.
     YQ_WORKER_SCRIPT="
-        .services.\"${N8N_WORKER_SERVICE_NAME}\" = .services.\"${N8N_MAIN_SERVICE_NAME}\" |
-        .services.\"${N8N_WORKER_SERVICE_NAME}\" |= (
-          del(.ports) |
-          del(.labels) |
-          del(.depends_on) |
-          .container_name = \"${N8N_PROJECT_NAME}_worker\" |
-          .restart = \"unless-stopped\" |
-          .environment |= map(
-            if type == \"string\" and (contains(\"EXECUTIONS_PROCESS=main\")) 
-            then sub(\"EXECUTIONS_PROCESS=main\", \"EXECUTIONS_PROCESS=worker\") 
-            else . end
-          )
+      .services.\"${N8N_WORKER_SERVICE_NAME}\" = .services.\"${N8N_MAIN_SERVICE_NAME}\" |
+      .services.\"${N8N_WORKER_SERVICE_NAME}\" |= (
+        del(.ports) |
+        del(.labels) |
+        del(.depends_on) |
+        .container_name = \"${N8N_PROJECT_NAME}_worker\" |
+        .restart = \"unless-stopped\" |
+        .environment |= map(
+          if type == \"string\" and contains(\"EXECUTIONS_PROCESS=main\") 
+          then sub(\"EXECUTIONS_PROCESS=main\", \"EXECUTIONS_PROCESS=worker\") 
+          else . end
         )
+      )
     "
     echo "$YQ_WORKER_SCRIPT" | $YQ_CMD eval -i - "$N8N_COMPOSE_PATH"
     if [ $? -ne 0 ]; then
