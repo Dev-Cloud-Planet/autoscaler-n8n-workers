@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.5 (Corregida y Mejorada)
+# Versión 9.6 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -29,8 +29,13 @@ run_and_verify() {
 }
 restore_and_exit() {
     echo "🛡️  Restaurando 'docker-compose.yml' desde la copia de seguridad..."
-    mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"
-    echo "   Restauración completa. El script se detendrá."
+    # Solo restaura si existe una copia de seguridad
+    if [ -f "$BACKUP_FILE" ]; then
+        mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"
+        echo "   Restauración completa. El script se detendrá."
+    else
+        echo "   No se encontró un archivo de backup para restaurar. El script se detendrá."
+    fi
     exit 1
 }
 
@@ -77,15 +82,10 @@ N8N_WORKER_SERVICE_NAME="n8n-worker"
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
-# --- CORRECCIÓN: Lógica mejorada para detectar el nombre de la red ---
-# Paso 1: Obtener la clave de la red del servicio n8n (ej: "n8n-network")
+# Lógica mejorada para detectar el nombre de la red
 NETWORK_KEY=$($YQ_CMD eval ".services[\"$N8N_MAIN_SERVICE_NAME\"].networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then echo "❌ Error: No se pudo detectar la clave de red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
-
-# Paso 2: Comprobar si esa clave de red tiene un 'name' explícito definido
 EXPLICIT_NETWORK_NAME=$($YQ_CMD eval ".networks[\"$NETWORK_KEY\"].name" "$N8N_COMPOSE_PATH")
-
-# Paso 3: Determinar el nombre final de la red
 if [ -n "$EXPLICIT_NETWORK_NAME" ] && [ "$EXPLICIT_NETWORK_NAME" != "null" ]; then
     FINAL_N8N_NETWORK_NAME="$EXPLICIT_NETWORK_NAME"
     echo "✅ Red de Docker detectada con nombre explícito: '$FINAL_N8N_NETWORK_NAME'"
@@ -93,7 +93,6 @@ else
     FINAL_N8N_NETWORK_NAME="${N8N_PROJECT_NAME}_${NETWORK_KEY}"
     echo "✅ Red de Docker detectada (nombre por defecto): '$FINAL_N8N_NETWORK_NAME'"
 fi
-#----------------------------------------------------------------------
 
 # --- FASE 2: MODIFICACIÓN SEGURA DEL DOCKER-COMPOSE ---
 print_header "2. Preparando tu Stack de n8n para Escalado"
@@ -106,20 +105,32 @@ else
     if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then echo "Instalación cancelada." && exit 1; fi
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
     echo "🔧 Modificando el stack de n8n paso a paso..."
-
+    
+    # Modificar servicio principal
     run_and_verify \
-        "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"N8N_TRUST_PROXY=true\", \"N8N_RUNNERS_ENABLED=true\", \"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"]' '$N8N_COMPOSE_PATH'" \
+        "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"]' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")' '$N8N_COMPOSE_PATH'" \
         "Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
 
-    WORKER_BLOCK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH" | \
-        $YQ_CMD eval '.restart = "unless-stopped" | del(.ports) | del(.labels) | .environment |= map(if . == "EXECUTIONS_PROCESS=main" then "EXECUTIONS_PROCESS=worker" else . end)' -)
-
+    # CORRECCIÓN: Método robusto y atómico para crear el worker, evitando archivos corruptos.
     run_and_verify \
-        "$YQ_CMD eval -i '.services.\"$N8N_WORKER_SERVICE_NAME\" = '"$($YQ_CMD eval -o=json <<< "$WORKER_BLOCK")"' ' '$N8N_COMPOSE_PATH'" \
+        "'$YQ_CMD' eval -i '
+            # 1. Copia el servicio principal al nuevo servicio worker
+            .services.\"'$N8N_WORKER_SERVICE_NAME'\" = .services.\"'$N8N_MAIN_SERVICE_NAME'\" |
+            # 2. Modifica en el sitio el nuevo servicio worker
+            .services.\"'$N8N_WORKER_SERVICE_NAME'\" |= (
+                del(.ports) |
+                del(.labels) |
+                del(.depends_on) |
+                .container_name = \"'${N8N_PROJECT_NAME}'_worker\" |
+                .restart = \"unless-stopped\" |
+                # Cambia el proceso de main a worker
+                .environment |= map(if . == \"EXECUTIONS_PROCESS=main\" then \"EXECUTIONS_PROCESS=worker\" else . end)
+            )
+        ' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services | has(\"$N8N_WORKER_SERVICE_NAME\")' '$N8N_COMPOSE_PATH'" \
-        "Añadido el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
-
+        "Añadido y configurado el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
+        
     echo ""; echo "✅ ¡Éxito! Tu archivo 'docker-compose.yml' ha sido modificado y verificado."
     echo "🔄 Aplicando la nueva configuración a tu stack de n8n..."; $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
     echo "✅ Tu stack de n8n ha sido actualizado y ahora está listo para escalar."
@@ -240,7 +251,7 @@ echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"; cd ..
     echo "Tu stack ha sido configurado y el servicio de auto-escalado está en funcionamiento."; echo ""
-    echo "Pasos siguientes:"; echo "  1. Verifica con 'cat docker-compose.yml' que el archivo fue modificado."; echo "  2. Verifica los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
+    echo "Pasos siguientes:"; echo "  1. Verifica con 'cat docker-compose.yml' que el archivo fue modificado correctamente."; echo "  2. Verifica los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
