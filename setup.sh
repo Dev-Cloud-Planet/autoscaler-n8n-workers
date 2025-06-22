@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.7 
+# Versión 9.8 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -13,7 +13,6 @@ run_and_verify() {
     local modification_cmd=$1
     local verification_cmd=$2
     local success_message=$3
-    # Usamos eval para permitir comandos complejos con comillas y variables
     eval "$modification_cmd"
     if [ $? -ne 0 ]; then
         echo "❌ ERROR: El comando yq falló con un código de error."
@@ -30,7 +29,6 @@ run_and_verify() {
 }
 restore_and_exit() {
     echo "🛡️  Restaurando 'docker-compose.yml' desde la copia de seguridad..."
-    # Solo restaura si existe una copia de seguridad
     if [ -f "$BACKUP_FILE" ]; then
         mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"
         echo "   Restauración completa. El script se detendrá."
@@ -83,7 +81,6 @@ N8N_WORKER_SERVICE_NAME="n8n-worker"
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
-# Lógica mejorada para detectar el nombre de la red
 NETWORK_KEY=$($YQ_CMD eval ".services[\"$N8N_MAIN_SERVICE_NAME\"].networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then echo "❌ Error: No se pudo detectar la clave de red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
 EXPLICIT_NETWORK_NAME=$($YQ_CMD eval ".networks[\"$NETWORK_KEY\"].name" "$N8N_COMPOSE_PATH")
@@ -107,27 +104,33 @@ else
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
     echo "🔧 Modificando el stack de n8n paso a paso..."
     
-    run_and_verify \
-        "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"]' '$N8N_COMPOSE_PATH'" \
-        "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")' '$N8N_COMPOSE_PATH'" \
-        "Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
+    # Modificar servicio principal
+    $YQ_CMD eval -i '.services."'"$N8N_MAIN_SERVICE_NAME"'".environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=main", "QUEUE_BULL_REDIS_HOST='"$REDIS_HOST"'"]' "$N8N_COMPOSE_PATH"
+    echo "✅ OK: Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
 
-    # CORRECCIÓN: Se define el script de yq en una variable para evitar conflictos de comillas con eval.
+    # CORRECCIÓN: Método robusto usando STDIN para evitar problemas de comillas.
     YQ_WORKER_SCRIPT="
-        .services.\\\"$N8N_WORKER_SERVICE_NAME\\\" = .services.\\\"$N8N_MAIN_SERVICE_NAME\\\" |
-        .services.\\\"$N8N_WORKER_SERVICE_NAME\\\" |= (
+        .services.\"${N8N_WORKER_SERVICE_NAME}\" = .services.\"${N8N_MAIN_SERVICE_NAME}\" |
+        .services.\"${N8N_WORKER_SERVICE_NAME}\" |= (
             del(.ports) |
             del(.labels) |
             del(.depends_on) |
-            .container_name = \\\"${N8N_PROJECT_NAME}_worker\\\" |
-            .restart = \\\"unless-stopped\\\" |
-            .environment |= map(if . == \\\"EXECUTIONS_PROCESS=main\\\" then \\\"EXECUTIONS_PROCESS=worker\\\" else . end)
+            .container_name = \"${N8N_PROJECT_NAME}_worker\" |
+            .restart = \"unless-stopped\" |
+            .environment |= map(if . == \"EXECUTIONS_PROCESS=main\" then \"EXECUTIONS_PROCESS=worker\" else . end)
         )
     "
-    run_and_verify \
-        "$YQ_CMD eval -i \"$YQ_WORKER_SCRIPT\" '$N8N_COMPOSE_PATH'" \
-        "$YQ_CMD eval '.services | has(\"$N8N_WORKER_SERVICE_NAME\")' '$N8N_COMPOSE_PATH'" \
-        "Añadido y configurado el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
+    echo "$YQ_WORKER_SCRIPT" | $YQ_CMD eval -i - "$N8N_COMPOSE_PATH"
+    if [ $? -ne 0 ]; then
+        echo "❌ ERROR: El comando yq para crear el worker falló."
+        restore_and_exit
+    fi
+    verification_output=$($YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH")
+    if [ "$verification_output" != "true" ]; then
+        echo "❌ ERROR FATAL: La verificación falló, no se pudo crear el servicio worker."
+        restore_and_exit
+    fi
+    echo "✅ OK: Añadido y configurado el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
         
     echo ""; echo "✅ ¡Éxito! Tu archivo 'docker-compose.yml' ha sido modificado y verificado."
     echo "🔄 Aplicando la nueva configuración a tu stack de n8n..."; $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
