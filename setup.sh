@@ -20,8 +20,7 @@ ask() {
     echo "${reply:-$default}"
 }
 
-# Esta función es la clave. Ejecuta una modificación y luego verifica
-# que el contenido del archivo realmente ha cambiado.
+# Esta función es la clave. Ejecuta una modificación y luego verifica.
 run_and_verify() {
     local modification_cmd=$1
     local verification_cmd=$2
@@ -32,8 +31,8 @@ run_and_verify() {
 
     # Verificar si el comando yq en sí mismo falló
     if [ $? -ne 0 ]; then
-        echo "❌ ERROR: El comando de modificación yq falló con un código de error."
-        echo "   Comando: $modification_cmd"
+        echo "❌ ERROR: El comando yq falló con un código de error."
+        echo "   Comando ejecutado: $modification_cmd"
         restore_and_exit
     fi
 
@@ -54,7 +53,6 @@ restore_and_exit() {
     echo "   Restauración completa. El script se detendrá."
     exit 1
 }
-
 
 # --- Verificación de Dependencias ---
 check_deps() {
@@ -123,37 +121,31 @@ else
     
     # --- BLOQUE DE MODIFICACIÓN ATÓMICA Y VERIFICADA ---
     
-    # Paso 1: Añadir N8N_TRUST_PROXY
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += \"N8N_TRUST_PROXY=true\"' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"N8N_TRUST_PROXY=true\")' '$N8N_COMPOSE_PATH'" \
         "Añadida variable 'N8N_TRUST_PROXY'."
 
-    # Paso 2: Añadir N8N_RUNNERS_ENABLED
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += \"N8N_RUNNERS_ENABLED=true\"' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"N8N_RUNNERS_ENABLED=true\")' '$N8N_COMPOSE_PATH'" \
         "Añadida variable 'N8N_RUNNERS_ENABLED'."
 
-    # Paso 3: Añadir EXECUTIONS_MODE
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += \"EXECUTIONS_MODE=queue\"' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")' '$N8N_COMPOSE_PATH'" \
         "Habilitado el modo 'queue'."
 
-    # Paso 4: Añadir EXECUTIONS_PROCESS
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += \"EXECUTIONS_PROCESS=main\"' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_PROCESS=main\")' '$N8N_COMPOSE_PATH'" \
         "Configurado el servicio principal como 'main'."
         
-    # Paso 5: Añadir QUEUE_BULL_REDIS_HOST
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\")' '$N8N_COMPOSE_PATH'" \
         "Configurado el host de Redis para la cola."
 
-    # Paso 6: Crear y añadir el servicio worker
     WORKER_BLOCK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH" | \
         $YQ_CMD eval '.restart = "unless-stopped" | del(.ports) | del(.labels) | .environment.EXECUTIONS_PROCESS = "worker"' -)
     
@@ -184,7 +176,6 @@ TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
 
 echo "-> Generando archivos para el servicio autoscaler..."
-
 cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
@@ -260,7 +251,7 @@ def send_telegram_notification(message):
     except requests.exceptions.RequestException: pass
 def run_docker_command(command):
     try:
-        full_command = f"docker-compose -p {N8N_PROJECT_NAME} {command}"
+        full_command = f"{COMPOSE_CMD} -p {N8N_PROJECT_NAME} {command}"
         result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -314,5 +305,4 @@ else
     cd ..
 fi
 
-# Limpieza final
 rm -f ./yq
