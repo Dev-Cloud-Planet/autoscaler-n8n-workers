@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.6 
+# Versión 9.7 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -13,6 +13,7 @@ run_and_verify() {
     local modification_cmd=$1
     local verification_cmd=$2
     local success_message=$3
+    # Usamos eval para permitir comandos complejos con comillas y variables
     eval "$modification_cmd"
     if [ $? -ne 0 ]; then
         echo "❌ ERROR: El comando yq falló con un código de error."
@@ -106,28 +107,25 @@ else
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
     echo "🔧 Modificando el stack de n8n paso a paso..."
     
-    # Modificar servicio principal
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"]' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")' '$N8N_COMPOSE_PATH'" \
         "Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
 
-    # CORRECCIÓN: Método robusto y atómico para crear el worker, evitando archivos corruptos.
+    # CORRECCIÓN: Se define el script de yq en una variable para evitar conflictos de comillas con eval.
+    YQ_WORKER_SCRIPT="
+        .services.\\\"$N8N_WORKER_SERVICE_NAME\\\" = .services.\\\"$N8N_MAIN_SERVICE_NAME\\\" |
+        .services.\\\"$N8N_WORKER_SERVICE_NAME\\\" |= (
+            del(.ports) |
+            del(.labels) |
+            del(.depends_on) |
+            .container_name = \\\"${N8N_PROJECT_NAME}_worker\\\" |
+            .restart = \\\"unless-stopped\\\" |
+            .environment |= map(if . == \\\"EXECUTIONS_PROCESS=main\\\" then \\\"EXECUTIONS_PROCESS=worker\\\" else . end)
+        )
+    "
     run_and_verify \
-        "'$YQ_CMD' eval -i '
-            # 1. Copia el servicio principal al nuevo servicio worker
-            .services.\"'$N8N_WORKER_SERVICE_NAME'\" = .services.\"'$N8N_MAIN_SERVICE_NAME'\" |
-            # 2. Modifica en el sitio el nuevo servicio worker
-            .services.\"'$N8N_WORKER_SERVICE_NAME'\" |= (
-                del(.ports) |
-                del(.labels) |
-                del(.depends_on) |
-                .container_name = \"'${N8N_PROJECT_NAME}'_worker\" |
-                .restart = \"unless-stopped\" |
-                # Cambia el proceso de main a worker
-                .environment |= map(if . == \"EXECUTIONS_PROCESS=main\" then \"EXECUTIONS_PROCESS=worker\" else . end)
-            )
-        ' '$N8N_COMPOSE_PATH'" \
+        "$YQ_CMD eval -i \"$YQ_WORKER_SCRIPT\" '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services | has(\"$N8N_WORKER_SERVICE_NAME\")' '$N8N_COMPOSE_PATH'" \
         "Añadido y configurado el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
         
