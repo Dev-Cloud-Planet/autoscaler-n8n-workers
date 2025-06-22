@@ -3,11 +3,10 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.2 
+# Versión 9.3 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
-
 print_header() { echo -e "\n\033[1;34m=================================================\033[0m\n\033[1;34m  $1\033[0m\n\033[1;34m=================================================\033[0m\n"; }
 ask() { read -p "$1 (def: $2): " reply < /dev/tty; echo "${reply:-$default}"; }
 run_and_verify() {
@@ -74,8 +73,13 @@ echo "✅ Proyecto n8n detectado como: '$N8N_PROJECT_NAME'"
 
 N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "n8nio/n8n*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN_SERVICE_NAME:-n8n}")
+
 N8N_WORKER_SERVICE_NAME="n8n-worker"
-N8N_NETWORK_NAME=$($YQ_CMD eval ".services.$N8N_MAIN_SERVICE_NAME.networks[0]" "$N8N_COMPOSE_PATH")
+
+# --- LÍNEA CORREGIDA ---
+N8N_NETWORK_NAME=$($YQ_CMD eval ".services.$N8N_MAIN_SERVICE_NAME.networks | .[0]" "$N8N_COMPOSE_PATH")
+# --- FIN DE LA CORRECCIÓN ---
+
 if [ -z "$N8N_NETWORK_NAME" ] || [ "$N8N_NETWORK_NAME" == "null" ]; then echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
 echo "✅ Red de Docker detectada: '$N8N_NETWORK_NAME'"
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
@@ -93,39 +97,20 @@ else
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
     echo "🔧 Modificando el stack de n8n paso a paso..."
     
-    # --- BLOQUE DE MODIFICACIÓN CORREGIDO (Sintaxis v4) ---
-    
-    # Añadir variables al servicio n8n-main
     run_and_verify \
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"N8N_TRUST_PROXY=true\", \"N8N_RUNNERS_ENABLED=true\", \"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"]' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")' '$N8N_COMPOSE_PATH'" \
         "Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
 
-    # Clonar el servicio main para crear el worker
+    WORKER_BLOCK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH" | \
+        $YQ_CMD eval '.restart = "unless-stopped" | del(.ports) | del(.labels) | .environment |= map(if . == "EXECUTIONS_PROCESS=main" then "EXECUTIONS_PROCESS=worker" else . end)' -)
+    
     run_and_verify \
-        "$YQ_CMD eval -i '.services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\"' '$N8N_COMPOSE_PATH'" \
+        "$YQ_CMD eval -i '.services.\"$N8N_WORKER_SERVICE_NAME\" = '"$($YQ_CMD eval -o=json <<< "$WORKER_BLOCK")"' ' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services | has(\"$N8N_WORKER_SERVICE_NAME\")' '$N8N_COMPOSE_PATH'" \
-        "Creada la estructura base para el servicio '$N8N_WORKER_SERVICE_NAME'."
-
-    # Modificar el nuevo servicio worker
-    run_and_verify \
-        "$YQ_CMD eval -i '(.services.\"$N8N_WORKER_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_PROCESS=main\")) = \"EXECUTIONS_PROCESS=worker\"' '$N8N_COMPOSE_PATH'" \
-        "$YQ_CMD eval '.services.\"$N8N_WORKER_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_PROCESS=worker\")' '$N8N_COMPOSE_PATH'" \
-        "Configurado el servicio '$N8N_WORKER_SERVICE_NAME' como 'worker'."
-
-    run_and_verify \
-        "$YQ_CMD eval -i 'del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports)' '$N8N_COMPOSE_PATH'" \
-        "test ! \$($YQ_CMD eval '.services.\"$N8N_WORKER_SERVICE_NAME\" | has(\"ports\")' '$N8N_COMPOSE_PATH')" \
-        "Eliminados los puertos del worker."
-
-    run_and_verify \
-        "$YQ_CMD eval -i 'del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)' '$N8N_COMPOSE_PATH'" \
-        "test ! \$($YQ_CMD eval '.services.\"$N8N_WORKER_SERVICE_NAME\" | has(\"labels\")' '$N8N_COMPOSE_PATH')" \
-        "Eliminadas las labels de Traefik del worker."
+        "Añadido el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
         
-    # --- FIN DEL BLOQUE DE MODIFICACIÓN ---
-
-    echo ""; echo "✅ ¡Éxito! Tu 'docker-compose.yml' ha sido modificado y verificado."
+    echo ""; echo "✅ ¡Éxito! Tu archivo 'docker-compose.yml' ha sido modificado y verificado."
     echo "🔄 Aplicando la nueva configuración a tu stack de n8n..."; $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
     echo "✅ Tu stack de n8n ha sido actualizado y ahora está listo para escalar."
 fi
@@ -139,11 +124,8 @@ MIN_WORKERS=$(ask "Nº mínimo de workers que deben mantenerse activos" "0")
 IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un worker" "60")
 TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
-
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
-
 echo "-> Generando archivos para el servicio autoscaler..."
-# .env
 cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
@@ -155,7 +137,6 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
-# docker-compose.yml
 cat > docker-compose.yml << EOL
 services:
   autoscaler:
@@ -172,7 +153,6 @@ networks:
     name: ${N8N_PROJECT_NAME}_${N8N_NETWORK_NAME}
     external: true
 EOL
-# Dockerfile
 cat > Dockerfile << EOL
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -189,13 +169,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY autoscaler.py .
 CMD ["python", "-u", "autoscaler.py"]
 EOL
-# requirements.txt
 cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
-# autoscaler.py
 cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
@@ -247,7 +225,6 @@ if __name__ == "__main__":
         except KeyboardInterrupt: send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
         except Exception as e: print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 EOL
-
 echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; $COMPOSE_CMD_HOST down --remove-orphans > /dev/null 2>&1
 echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
 if [ $? -eq 0 ]; then
