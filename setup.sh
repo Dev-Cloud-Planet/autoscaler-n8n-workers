@@ -128,9 +128,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - n8n_shared_network
+      - n8n-network
 networks:
-  n8n_shared_network:
+  n8n-network:
     name: ${N8N_PROJECT_NAME}_${NETWORK_KEY}
     driver: bridge
 EOL
