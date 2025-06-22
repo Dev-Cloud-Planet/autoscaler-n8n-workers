@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 5.2
+# Versión 6.0
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -12,26 +12,27 @@ print_header() {
     echo -e "\033[1;34m  $1\033[0m"
     echo -e "\033[1;34m=================================================\033[0m\n"
 }
-
 ask() {
     local prompt default reply
-    prompt="$1"
-    default="$2"
+    prompt="$1"; default="$2"
     read -p "$prompt (def: $default): " reply < /dev/tty
     echo "${reply:-$default}"
 }
 
-# --- Verificación de Dependencias y Entorno ---
+# --- Verificación de Dependencias ---
 check_deps() {
     echo "🔎 Verificando dependencias y entorno del host..."
     for cmd in docker curl wget; do
         if ! command -v $cmd &> /dev/null; then echo "❌ Error: El comando '$cmd' es requerido." && exit 1; fi
     done
-    
-    if ! docker compose version &>/dev/null && ! docker-compose version &>/dev/null; then
+    if command -v docker &> /dev/null && docker compose version &> /dev/null; then
+        COMPOSE_CMD_HOST="docker compose"
+    elif command -v docker-compose &> /dev/null; then
+        COMPOSE_CMD_HOST="docker-compose"
+    else
         echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose' en el host." && exit 1
     fi
-
+    echo "✅ Usando '$COMPOSE_CMD_HOST' para las operaciones del host."
     if [ ! -f ./yq ]; then
         echo "📥 Descargando la versión correcta de 'yq' localmente..."
         YQ_URL="https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64"
@@ -44,7 +45,6 @@ check_deps() {
 # --- INICIO DEL SCRIPT ---
 clear
 check_deps
-
 print_header "Instalador del Servicio de Auto-Escalado para n8n"
 
 # --- DETECCIÓN DE CONTEXTO ---
@@ -63,51 +63,59 @@ print_header "2. Configuración del Stack"
 N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "n8nio/n8n*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 N8N_MAIN_SERVICE_NAME=$(ask "Introduce el nombre de tu servicio principal de n8n en el YAML" "${N8N_MAIN_SERVICE_NAME:-n8n}")
 N8N_WORKER_SERVICE_NAME="n8n-worker"
-
 N8N_NETWORK_NAME=$($YQ_CMD eval ".services.$N8N_MAIN_SERVICE_NAME.networks[0]" "$N8N_COMPOSE_PATH")
-if [ -z "$N8N_NETWORK_NAME" ] || [ "$N8N_NETWORK_NAME" == "null" ]; then
-    echo "❌ Error: No se pudo detectar la red para el servicio '$N8N_MAIN_SERVICE_NAME'." && exit 1
-fi
+if [ -z "$N8N_NETWORK_NAME" ] || [ "$N8N_NETWORK_NAME" == "null" ]; then echo "❌ Error: No se pudo detectar la red para el servicio '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
 echo "✅ Red detectada para n8n: '$N8N_NETWORK_NAME'"
-
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Introduce el Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
 # --- MODIFICACIÓN DEL DOCKER-COMPOSE DE N8N ---
 print_header "3. Preparando el Stack de n8n para Escalado"
-if $YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH" &>/dev/null; then
-    echo "✅ El servicio de worker '$N8N_WORKER_SERVICE_NAME' ya existe. Omitiendo modificación."
-else
-    read -p "¿Estás de acuerdo en modificar tu 'docker-compose.yml'? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
-    if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then echo "Instalación cancelada." && exit 1; fi
+echo "🔧 Verificando configurción base de n8n ('trust proxy' y 'runners')..."
+MODIFIED=false
+if ! $YQ_CMD eval ".services.${N8N_MAIN_SERVICE_NAME}.environment[] | select(. == \"N8N_TRUST_PROXY=true\")" "$N8N_COMPOSE_PATH" | grep -q "N8N_TRUST_PROXY=true"; then
+    $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment += \"N8N_TRUST_PROXY=true\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR: Falla al añadir N8N_TRUST_PROXY."; exit 1; }
+    echo "   - Añadida variable N8N_TRUST_PROXY=true."
+    MODIFIED=true
+fi
+if ! $YQ_CMD eval ".services.${N8N_MAIN_SERVICE_NAME}.environment[] | select(. == \"N8N_RUNNERS_ENABLED=true\")" "$N8N_COMPOSE_PATH" | grep -q "N8N_RUNNERS_ENABLED=true"; then
+    $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment += \"N8N_RUNNERS_ENABLED=true\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR: Falla al añadir N8N_RUNNERS_ENABLED."; exit 1; }
+    echo "   - Añadida variable N8N_RUNNERS_ENABLED=true."
+    MODIFIED=true
+fi
 
+if [ "$MODIFIED" = true ]; then
+    echo "🔄 Aplicando configuración base al contenedor de n8n..."
+    $COMPOSE_CMD_HOST up -d --force-recreate "$N8N_MAIN_SERVICE_NAME"
+    echo "✅ Contenedor n8n principal actualizado."
+else
+    echo "✅ Configuración base de n8n ya es correcta."
+fi
+
+echo "🔧 Verificando configuración de modo 'queue' y 'workers'..."
+if $YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH" &>/dev/null; then
+    echo "✅ El servicio de worker '$N8N_WORKER_SERVICE_NAME' ya existe. Omitiendo."
+else
+    read -p "¿Estás de acuerdo en habilitar el modo 'queue' y añadir workers? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
+    if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then echo "Instalación cancelada." && exit 1; fi
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"
     echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."
     cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
-
-    echo "🔧 Modificando el stack de n8n paso a paso..."
     
-    # --- BLOQUE DE MODIFICACIÓN GRANULAR Y CON VERIFICACIÓN ---
+    # Aplicar modo queue y crear worker
     $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment.EXECUTIONS_MODE = \"queue\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al añadir EXECUTIONS_MODE."; exit 1; }
     $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment.EXECUTIONS_PROCESS = \"main\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al añadir EXECUTIONS_PROCESS."; exit 1; }
     $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment.QUEUE_BULL_REDIS_HOST = \"$REDIS_HOST\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al añadir QUEUE_BULL_REDIS_HOST."; exit 1; }
-    
-    echo "➕ Creando el nuevo servicio de worker '$N8N_WORKER_SERVICE_NAME'..."
     $YQ_CMD eval -i ".services.${N8N_WORKER_SERVICE_NAME} = .services.${N8N_MAIN_SERVICE_NAME}" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al clonar el servicio n8n."; exit 1; }
     $YQ_CMD eval -i ".services.${N8N_WORKER_SERVICE_NAME}.environment.EXECUTIONS_PROCESS = \"worker\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al configurar el worker como 'worker'."; exit 1; }
     $YQ_CMD eval -i "del(.services.${N8N_WORKER_SERVICE_NAME}.ports)" "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i "del(.services.${N8N_WORKER_SERVICE_NAME}.labels)" "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i ".services.${N8N_WORKER_SERVICE_NAME}.restart = \"unless-stopped\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al configurar restart en worker."; exit 1; }
-    # --- FIN DEL BLOQUE DE MODIFICACIÓN ---
 
     echo "✅ Archivo 'docker-compose.yml' modificado con éxito."
     echo "🔄 Aplicando la nueva configuración al stack de n8n..."
-    if command -v docker &> /dev/null && docker compose version &> /dev/null; then
-        docker compose up -d --remove-orphans
-    else
-        docker-compose up -d --remove-orphans
-    fi
-    echo "✅ Stack de n8n actualizado."
+    $COMPOSE_CMD_HOST up -d --remove-orphans
+    echo "✅ Stack de n8n actualizado con workers."
 fi
 
 # --- DESPLIEGUE DEL AUTOSCALER ---
@@ -120,10 +128,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un work
 TELEGRAM_BOT_TOKEN=$(ask "Introduce tu Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Introduce tu Chat ID de Telegram (opcional)" "")
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
-
-# --- Generación de Archivos para el Autoscaler ---
-echo "-> Generando archivo .env..."
-cat > .env << EOL
+echo "-> Generando archivo .env..."; cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
 N8N_WORKER_SERVICE_NAME=${N8N_WORKER_SERVICE_NAME}
@@ -134,8 +139,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
-echo "-> Generando archivo docker-compose.yml..."
-cat > docker-compose.yml << EOL
+echo "-> Generando archivo docker-compose.yml..."; cat > docker-compose.yml << EOL
 services:
   autoscaler:
     build: .
@@ -151,26 +155,13 @@ networks:
     name: ${N8N_PROJECT_NAME}_${N8N_NETWORK_NAME}
     external: true
 EOL
-
-echo "-> Generando archivo Dockerfile (CORREGIDO)..."
-cat > Dockerfile << EOL
+echo "-> Generando archivo Dockerfile..."; cat > Dockerfile << EOL
 FROM python:3.9-slim
-
-# Instalar dependencias del sistema, incluyendo GPG
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Instalar Docker CLI
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
     echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
     \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-    apt-get update && \
-    apt-get install -y docker-ce-cli
-
-# Instalar Docker Compose v2
+    apt-get update && apt-get install -y docker-ce-cli
 RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
 WORKDIR /app
@@ -207,7 +198,7 @@ def send_telegram_notification(message):
     except requests.exceptions.RequestException: pass
 def run_docker_command(command):
     try:
-        full_command = f"{COMPOSE_CMD} -p {N8N_PROJECT_NAME} {command}"
+        full_command = f"docker-compose -p {N8N_PROJECT_NAME} {command}"
         result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -239,11 +230,6 @@ if __name__ == "__main__":
         except KeyboardInterrupt: send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
         except Exception as e: print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 EOL
-if command -v docker &> /dev/null && docker compose version &> /dev/null; then
-    COMPOSE_CMD_HOST="docker compose"
-else
-    COMPOSE_CMD_HOST="docker-compose"
-fi
 echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; $COMPOSE_CMD_HOST down --remove-orphans > /dev/null 2>&1
 echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
 if [ $? -eq 0 ]; then
