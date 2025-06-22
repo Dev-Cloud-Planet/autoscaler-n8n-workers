@@ -293,4 +293,6 @@ if [ $? -eq 0 ]; then
     echo "  1. Verifica con 'cat docker-compose.yml' que el archivo fue modificado."
     echo "  2. Verifica los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
 else
-    echo -e "\n❌ Hubo un error durante el despliegue del autoscaler"; 
+    echo "❌ Hubo un error al desplegar el autoscaler."
+fi
+```
