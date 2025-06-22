@@ -3,12 +3,11 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.4 (Corregida y Mejorada)
+# Versión 9.5 (Corregida y Mejorada)
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
 print_header() { echo -e "\n\033[1;34m=================================================\033[0m\n\033[1;34m  $1\033[0m\n\033[1;34m=================================================\033[0m\n"; }
-# CORRECCIÓN: Se cambió $default por $2 para que la función use el argumento correcto.
 ask() { read -p "$1 (def: $2): " reply < /dev/tty; echo "${reply:-$2}"; }
 run_and_verify() {
     local modification_cmd=$1
@@ -74,15 +73,27 @@ echo "✅ Proyecto n8n detectado como: '$N8N_PROJECT_NAME'"
 
 N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "n8nio/n8n*" or .image == "docker.n8n.io/n8nio/n8n*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN_SERVICE_NAME:-n8n}")
-
 N8N_WORKER_SERVICE_NAME="n8n-worker"
-
-N8N_NETWORK_NAME=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks | .[0]" "$N8N_COMPOSE_PATH")
-
-if [ -z "$N8N_NETWORK_NAME" ] || [ "$N8N_NETWORK_NAME" == "null" ]; then echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'. Verifica el nombre del servicio y que esté conectado a una red en 'docker-compose.yml'." && exit 1; fi
-echo "✅ Red de Docker detectada: '$N8N_NETWORK_NAME'"
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
+
+# --- CORRECCIÓN: Lógica mejorada para detectar el nombre de la red ---
+# Paso 1: Obtener la clave de la red del servicio n8n (ej: "n8n-network")
+NETWORK_KEY=$($YQ_CMD eval ".services[\"$N8N_MAIN_SERVICE_NAME\"].networks[0]" "$N8N_COMPOSE_PATH")
+if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then echo "❌ Error: No se pudo detectar la clave de red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
+
+# Paso 2: Comprobar si esa clave de red tiene un 'name' explícito definido
+EXPLICIT_NETWORK_NAME=$($YQ_CMD eval ".networks[\"$NETWORK_KEY\"].name" "$N8N_COMPOSE_PATH")
+
+# Paso 3: Determinar el nombre final de la red
+if [ -n "$EXPLICIT_NETWORK_NAME" ] && [ "$EXPLICIT_NETWORK_NAME" != "null" ]; then
+    FINAL_N8N_NETWORK_NAME="$EXPLICIT_NETWORK_NAME"
+    echo "✅ Red de Docker detectada con nombre explícito: '$FINAL_N8N_NETWORK_NAME'"
+else
+    FINAL_N8N_NETWORK_NAME="${N8N_PROJECT_NAME}_${NETWORK_KEY}"
+    echo "✅ Red de Docker detectada (nombre por defecto): '$FINAL_N8N_NETWORK_NAME'"
+fi
+#----------------------------------------------------------------------
 
 # --- FASE 2: MODIFICACIÓN SEGURA DEL DOCKER-COMPOSE ---
 print_header "2. Preparando tu Stack de n8n para Escalado"
@@ -150,10 +161,9 @@ services:
       - n8n_shared_network
 networks:
   n8n_shared_network:
-    name: ${N8N_PROJECT_NAME}_${N8N_NETWORK_NAME}
+    name: ${FINAL_N8N_NETWORK_NAME}
     external: true
 EOL
-
 cat > Dockerfile << EOL
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -173,7 +183,6 @@ redis
 requests
 python-dotenv
 EOL
-
 cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
