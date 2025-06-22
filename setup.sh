@@ -162,7 +162,7 @@ services:
 networks:
   n8n_shared_network:
     name: ${FINAL_N8N_NETWORK_NAME}
-    external: true
+    driver: bridge
 EOL
 cat > Dockerfile << EOL
 FROM python:3.9-slim
