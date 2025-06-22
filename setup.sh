@@ -3,30 +3,12 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 9.8 
+# Versión 9.9 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
 print_header() { echo -e "\n\033[1;34m=================================================\033[0m\n\033[1;34m  $1\033[0m\n\033[1;34m=================================================\033[0m\n"; }
 ask() { read -p "$1 (def: $2): " reply < /dev/tty; echo "${reply:-$2}"; }
-run_and_verify() {
-    local modification_cmd=$1
-    local verification_cmd=$2
-    local success_message=$3
-    eval "$modification_cmd"
-    if [ $? -ne 0 ]; then
-        echo "❌ ERROR: El comando yq falló con un código de error."
-        echo "   Comando ejecutado: $modification_cmd"
-        restore_and_exit
-    fi
-    local verification_output
-    verification_output=$(eval "$verification_cmd")
-    if [ -z "$verification_output" ]; then
-        echo "❌ ERROR FATAL: La verificación falló para '$success_message'."
-        restore_and_exit
-    fi
-    echo "✅ OK: $success_message"
-}
 restore_and_exit() {
     echo "🛡️  Restaurando 'docker-compose.yml' desde la copia de seguridad..."
     if [ -f "$BACKUP_FILE" ]; then
@@ -104,11 +86,10 @@ else
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
     echo "🔧 Modificando el stack de n8n paso a paso..."
     
-    # Modificar servicio principal
     $YQ_CMD eval -i '.services."'"$N8N_MAIN_SERVICE_NAME"'".environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=main", "QUEUE_BULL_REDIS_HOST='"$REDIS_HOST"'"]' "$N8N_COMPOSE_PATH"
     echo "✅ OK: Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
 
-    # CORRECCIÓN: Método robusto usando STDIN para evitar problemas de comillas.
+    # CORRECCIÓN FINAL: Usar un archivo temporal para evitar conflictos con yq -i y la tubería.
     YQ_WORKER_SCRIPT="
       .services.\"${N8N_WORKER_SERVICE_NAME}\" = .services.\"${N8N_MAIN_SERVICE_NAME}\" |
       .services.\"${N8N_WORKER_SERVICE_NAME}\" |= (
@@ -118,20 +99,23 @@ else
         .container_name = \"${N8N_PROJECT_NAME}_worker\" |
         .restart = \"unless-stopped\" |
         .environment |= map(
-          if type == \"string\" and contains(\"EXECUTIONS_PROCESS=main\") 
-          then sub(\"EXECUTIONS_PROCESS=main\", \"EXECUTIONS_PROCESS=worker\") 
+          if . == \"EXECUTIONS_PROCESS=main\" 
+          then \"EXECUTIONS_PROCESS=worker\"
           else . end
         )
       )
     "
-    echo "$YQ_WORKER_SCRIPT" | $YQ_CMD eval -i - "$N8N_COMPOSE_PATH"
+    TMP_FILE=$(mktemp)
+    echo "$YQ_WORKER_SCRIPT" | $YQ_CMD eval - "$N8N_COMPOSE_PATH" > "$TMP_FILE"
     if [ $? -ne 0 ]; then
-        echo "❌ ERROR: El comando yq para crear el worker falló."
+        echo "❌ ERROR: El comando yq para procesar la creación del worker falló."
+        rm -f "$TMP_FILE"
         restore_and_exit
     fi
+    mv "$TMP_FILE" "$N8N_COMPOSE_PATH"
     verification_output=$($YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH")
     if [ "$verification_output" != "true" ]; then
-        echo "❌ ERROR FATAL: La verificación falló, no se pudo crear el servicio worker."
+        echo "❌ ERROR FATAL: La verificación falló, no se pudo crear el servicio worker en el archivo."
         restore_and_exit
     fi
     echo "✅ OK: Añadido y configurado el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
