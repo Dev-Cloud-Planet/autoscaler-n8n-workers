@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 5.0
+# Versión 5.1
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -71,7 +71,7 @@ fi
 echo "✅ Red detectada para n8n: '$N8N_NETWORK_NAME'"
 
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
-REDIS_HOST=$(ask "Introduce el Host/IP de tu servidor Redis" "${REDIS_SERVICE_NAME:-redis}")
+REDIS_HOST=$(ask "Introduce el Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
 # --- MODIFICACIÓN DEL DOCKER-COMPOSE DE N8N ---
 print_header "3. Preparando el Stack de n8n para Escalado"
@@ -85,28 +85,23 @@ else
     echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."
     cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
 
-    echo "🔧 Modificando el stack de n8n..."
-    # Ejecutar todas las modificaciones en un solo bloque para mayor eficiencia y atomicidad
-    $YQ_CMD eval -i '
-        .services.n8n.environment += {"EXECUTIONS_MODE": "queue"} |
-        .services.n8n.environment += {"EXECUTIONS_PROCESS": "main"} |
-        .services.n8n.environment += {"QUEUE_BULL_REDIS_HOST": strenv(REDIS_HOST)} |
-        .services.n8n-worker = .services.n8n |
-        .services.n8n-worker.environment.EXECUTIONS_PROCESS = "worker" |
-        del(.services.n8n-worker.ports) |
-        del(.services.n8n-worker.labels) |
-        .services.n8n-worker.restart = "unless-stopped"
-    ' --from-file <(echo "REDIS_HOST=$REDIS_HOST") "$N8N_COMPOSE_PATH"
+    echo "🔧 Modificando el stack de n8n paso a paso..."
     
-    if [ $? -ne 0 ]; then
-        echo "❌ ERROR: Falló la modificación del archivo docker-compose.yml. Revirtiendo desde la copia de seguridad."
-        mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"
-        exit 1
-    fi
+    # --- BLOQUE DE MODIFICACIÓN GRANULAR Y CON VERIFICACIÓN ---
+    $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment.EXECUTIONS_MODE = \"queue\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al añadir EXECUTIONS_MODE."; exit 1; }
+    $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment.EXECUTIONS_PROCESS = \"main\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al añadir EXECUTIONS_PROCESS."; exit 1; }
+    $YQ_CMD eval -i ".services.${N8N_MAIN_SERVICE_NAME}.environment.QUEUE_BULL_REDIS_HOST = \"$REDIS_HOST\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al añadir QUEUE_BULL_REDIS_HOST."; exit 1; }
+    
+    echo "➕ Creando el nuevo servicio de worker '$N8N_WORKER_SERVICE_NAME'..."
+    $YQ_CMD eval -i ".services.${N8N_WORKER_SERVICE_NAME} = .services.${N8N_MAIN_SERVICE_NAME}" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al clonar el servicio n8n."; exit 1; }
+    $YQ_CMD eval -i ".services.${N8N_WORKER_SERVICE_NAME}.environment.EXECUTIONS_PROCESS = \"worker\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al configurar el worker como 'worker'."; exit 1; }
+    $YQ_CMD eval -i "del(.services.${N8N_WORKER_SERVICE_NAME}.ports)" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i "del(.services.${N8N_WORKER_SERVICE_NAME}.labels)" "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i ".services.${N8N_WORKER_SERVICE_NAME}.restart = \"unless-stopped\"" "$N8N_COMPOSE_PATH" || { echo "❌ ERROR FATAL: Falla al configurar restart en worker."; exit 1; }
+    # --- FIN DEL BLOQUE DE MODIFICACIÓN ---
 
     echo "✅ Archivo 'docker-compose.yml' modificado con éxito."
     echo "🔄 Aplicando la nueva configuración al stack de n8n..."
-    # Detectar el comando compose del host para esta operación
     if command -v docker &> /dev/null && docker compose version &> /dev/null; then
         docker compose up -d --remove-orphans
     else
@@ -124,13 +119,8 @@ MIN_WORKERS=$(ask "Nº mínimo de workers que deben mantenerse activos" "0")
 IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un worker" "60")
 TELEGRAM_BOT_TOKEN=$(ask "Introduce tu Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Introduce tu Chat ID de Telegram (opcional)" "")
-
-mkdir -p "$AUTOSCALER_PROJECT_DIR"
-cd "$AUTOSCALER_PROJECT_DIR" || exit
-
-# --- Generación de Archivos para el Autoscaler ---
-echo "-> Generando archivo .env..."
-cat > .env << EOL
+mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
+echo "-> Generando archivo .env..."; cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
 N8N_WORKER_SERVICE_NAME=${N8N_WORKER_SERVICE_NAME}
@@ -141,10 +131,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
-
-echo "-> Generando archivo docker-compose.yml..."
-
-cat > docker-compose.yml << EOL
+echo "-> Generando archivo docker-compose.yml..."; cat > docker-compose.yml << EOL
 services:
   autoscaler:
     build: .
@@ -160,45 +147,28 @@ networks:
     name: ${N8N_PROJECT_NAME}_${N8N_NETWORK_NAME}
     external: true
 EOL
-
-echo "-> Generando archivo Dockerfile (con Docker y Compose incluidos)..."
-cat > Dockerfile << EOL
+echo "-> Generando archivo Dockerfile..."; cat > Dockerfile << EOL
 FROM python:3.9-slim
-
-# Instalar dependencias del sistema y Docker
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Instalar Docker CLI
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
-    \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
-    && apt-get update \
-    && apt-get install -y docker-ce-cli
-
-# Instalar Docker Compose v2
-RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose \
-    && chmod +x /usr/local/bin/docker-compose
-
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+    \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && apt-get install -y docker-ce-cli
+RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY autoscaler.py .
 CMD ["python", "-u", "autoscaler.py"]
 EOL
-
-echo "-> Generando archivo requirements.txt..."
-cat > requirements.txt << 'EOL'
+echo "-> Generando archivo requirements.txt..."; cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
-
-echo "-> Generando archivo autoscaler.py..."
-cat > autoscaler.py << 'EOL'
-import os, time, subprocess, redis, requests, shutil
+echo "-> Generando archivo autoscaler.py..."; cat > autoscaler.py << 'EOL'
+import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
 load_dotenv()
 REDIS_HOST = os.getenv('REDIS_HOST')
@@ -212,13 +182,12 @@ COMPOSE_CMD = "/usr/local/bin/docker-compose"
 try:
     redis_client = redis.Redis(host=REDIS_HOST, decode_responses=True, socket_connect_timeout=5)
     redis_client.ping(); print("✅ Conexión con Redis establecida con éxito.")
-except redis.exceptions.RedisError as e:
-    print(f"❌ Error fatal al conectar con Redis: {e}"); exit(1)
+except redis.exceptions.RedisError as e: print(f"❌ Error fatal al conectar con Redis: {e}"); exit(1)
 def send_telegram_notification(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"; payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
     try: requests.post(url, json=payload, timeout=10).raise_for_status()
-    except requests.exceptions.RequestException as e: print(f"⚠️ Error al enviar notificación a Telegram: {e}")
+    except requests.exceptions.RequestException: pass
 def run_docker_command(command):
     try:
         full_command = f"{COMPOSE_CMD} -p {N8N_PROJECT_NAME} {command}"
@@ -246,36 +215,22 @@ if __name__ == "__main__":
                 scale_workers(min(running_workers + 1, MAX_WORKERS)); idle_since = None
             elif queue_size == 0 and running_workers > MIN_WORKERS:
                 if idle_since is None: idle_since = time.time()
-                if time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN:
-                    scale_workers(max(running_workers - 1, MIN_WORKERS)); idle_since = None
+                if time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN: scale_workers(max(running_workers - 1, MIN_WORKERS)); idle_since = None
             elif queue_size > 0: idle_since = None
             time.sleep(POLL_INTERVAL)
-        except redis.exceptions.RedisError as e:
-            print(f"⚠️ Error de Redis: {e}. Reintentando..."); time.sleep(POLL_INTERVAL * 2)
-        except KeyboardInterrupt:
-            send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
-        except Exception as e:
-            print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
+        except redis.exceptions.RedisError as e: print(f"⚠️ Error de Redis: {e}. Reintentando..."); time.sleep(POLL_INTERVAL * 2)
+        except KeyboardInterrupt: send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
+        except Exception as e: print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 EOL
-
-# --- Despliegue con Limpieza Previa ---
-echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
-    docker compose down --remove-orphans > /dev/null 2>&1
+    COMPOSE_CMD_HOST="docker compose"
 else
-    docker-compose down --remove-orphans > /dev/null 2>&1
+    COMPOSE_CMD_HOST="docker-compose"
 fi
-
-echo "🚀 Desplegando el servicio de auto-escalado (esto puede tardar por la construcción de la imagen)..."
-if command -v docker &> /dev/null && docker compose version &> /dev/null; then
-    docker compose up -d --build
-else
-    docker-compose up -d --build
-fi
-
+echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; $COMPOSE_CMD_HOST down --remove-orphans > /dev/null 2>&1
+echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"
-    echo "Tu stack de n8n ha sido configurado y el servicio de auto-escalado está en funcionamiento."
     echo "Comandos útiles:"
     echo "  - Ver logs del autoscaler: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
     echo "  - Detener el autoscaler:   (cd ${AUTOSCALER_PROJECT_DIR} && docker compose down)"
