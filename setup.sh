@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n
 #
-# Versión 10.3
+# Versión 10.4 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -112,12 +112,19 @@ else
         "$YQ_CMD eval -i '.services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"N8N_TRUST_PROXY=true\", \"N8N_RUNNERS_ENABLED=true\", \"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"]' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")' '$N8N_COMPOSE_PATH'" \
         "Configurado el servicio '$N8N_MAIN_SERVICE_NAME' para modo 'queue'."
+
     WORKER_BLOCK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH" | \
-        $YQ_CMD eval '.restart = "unless-stopped" | del(.ports) | del(.labels) | .environment |= map(if test("EXECUTIONS_PROCESS=main") then "EXECUTIONS_PROCESS=worker" else . end)' -)
+        $YQ_CMD eval '.restart = "unless-stopped" | del(.ports) | del(.labels) | .environment |= map(if . == "EXECUTIONS_PROCESS=main" then "EXECUTIONS_PROCESS=worker" else . end)' -)
+    
+    TEMP_FILE=$(mktemp)
+    echo "$WORKER_BLOCK" > "$TEMP_FILE"
+    
     run_and_verify \
-        "$YQ_CMD eval -i '.services.\"$N8N_WORKER_SERVICE_NAME\" = '"$($YQ_CMD eval -o=json <<< "$WORKER_BLOCK")"' ' '$N8N_COMPOSE_PATH'" \
+        "$YQ_CMD eval -i '.services.\"$N8N_WORKER_SERVICE_NAME\" = load(\"$TEMP_FILE\")' '$N8N_COMPOSE_PATH'" \
         "$YQ_CMD eval '.services | has(\"$N8N_WORKER_SERVICE_NAME\")' '$N8N_COMPOSE_PATH' | grep true" \
         "Añadido el nuevo servicio '$N8N_WORKER_SERVICE_NAME'."
+    
+    rm -f "$TEMP_FILE"
         
     echo ""; echo "✅ ¡Éxito! Tu archivo 'docker-compose.yml' ha sido modificado y verificado."
     echo "🔄 Aplicando la nueva configuración a tu stack..."; $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
