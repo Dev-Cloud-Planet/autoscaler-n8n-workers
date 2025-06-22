@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n (Ejecutar en Sitio)
 #
-# Versión 5.1
+# Versión 5.2
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -120,7 +120,10 @@ IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un work
 TELEGRAM_BOT_TOKEN=$(ask "Introduce tu Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Introduce tu Chat ID de Telegram (opcional)" "")
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
-echo "-> Generando archivo .env..."; cat > .env << EOL
+
+# --- Generación de Archivos para el Autoscaler ---
+echo "-> Generando archivo .env..."
+cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
 N8N_WORKER_SERVICE_NAME=${N8N_WORKER_SERVICE_NAME}
@@ -131,7 +134,8 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
-echo "-> Generando archivo docker-compose.yml..."; cat > docker-compose.yml << EOL
+echo "-> Generando archivo docker-compose.yml..."
+cat > docker-compose.yml << EOL
 services:
   autoscaler:
     build: .
@@ -147,13 +151,26 @@ networks:
     name: ${N8N_PROJECT_NAME}_${N8N_NETWORK_NAME}
     external: true
 EOL
-echo "-> Generando archivo Dockerfile..."; cat > Dockerfile << EOL
+
+echo "-> Generando archivo Dockerfile (CORREGIDO)..."
+cat > Dockerfile << EOL
 FROM python:3.9-slim
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Instalar dependencias del sistema, incluyendo GPG
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar Docker CLI
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
     echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
     \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-    apt-get update && apt-get install -y docker-ce-cli
+    apt-get update && \
+    apt-get install -y docker-ce-cli
+
+# Instalar Docker Compose v2
 RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
 WORKDIR /app
