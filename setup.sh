@@ -76,9 +76,7 @@ N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN
 
 N8N_WORKER_SERVICE_NAME="n8n-worker"
 
-# --- LÍNEA CORREGIDA ---
 N8N_NETWORK_NAME=$($YQ_CMD eval ".services.$N8N_MAIN_SERVICE_NAME.networks | .[0]" "$N8N_COMPOSE_PATH")
-# --- FIN DE LA CORRECCIÓN ---
 
 if [ -z "$N8N_NETWORK_NAME" ] || [ "$N8N_NETWORK_NAME" == "null" ]; then echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
 echo "✅ Red de Docker detectada: '$N8N_NETWORK_NAME'"
@@ -138,6 +136,7 @@ TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
 cat > docker-compose.yml << EOL
+version: '3.8'
 services:
   autoscaler:
     build: .
