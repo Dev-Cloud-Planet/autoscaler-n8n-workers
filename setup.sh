@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n
 #
-# Versión 11.0 
+# Versión 11.1
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -51,11 +51,9 @@ echo "✅ Proyecto n8n detectado como: '$N8N_PROJECT_NAME'"
 N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "n8nio/n8n*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN_SERVICE_NAME:-n8n}")
 N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"
-
 NETWORK_KEY=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
 echo "✅ Red de Docker detectada: '$NETWORK_KEY'"
-
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
@@ -71,10 +69,8 @@ else
     
     echo "🔧 Generando parche de configuración..."
     
-    # Extraer la configuración base del servicio n8n principal para clonarla
     N8N_BASE_CONFIG=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH")
     
-    # Crear el archivo patch.yml con las modificaciones
     cat << EOL > patch.yml
 services:
   ${N8N_MAIN_SERVICE_NAME}:
@@ -101,17 +97,21 @@ $(echo "$N8N_BASE_CONFIG" | $YQ_CMD eval '
 EOL
 
     echo "⚙️  Aplicando parche..."
-    # Usar yq para fusionar el archivo original con el parche
     $YQ_CMD eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' "$N8N_COMPOSE_PATH" patch.yml > new-compose.yml
 
-    # Verificación final antes de reemplazar
     if [ -s new-compose.yml ] && $YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" new-compose.yml | grep -q "true"; then
         echo "✅ Nueva configuración generada y verificada con éxito."
         mv new-compose.yml "$N8N_COMPOSE_PATH"
         
+        # --- PASO CRÍTICO AÑADIDO ---
         echo "🔄 Aplicando la nueva configuración al stack de n8n..."
         $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
+        if [ $? -ne 0 ]; then
+            echo "❌ ERROR FATAL: Falló el reinicio del stack principal. Revirtiendo..."
+            restore_and_exit
+        fi
         echo "✅ Tu stack de n8n ha sido actualizado y está listo para escalar."
+        
     else
         echo "❌ ERROR FATAL: La fusión de la configuración falló. Revirtiendo..."
         restore_and_exit
@@ -155,9 +155,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - n8n_shared_network
+      - n8n-network
 networks:
-  n8n_shared_network:
+  n8n-network:
     name: ${N8N_PROJECT_NAME}_${NETWORK_KEY}
     driver: bridge
 EOL
@@ -167,10 +167,10 @@ FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+    \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
     apt-get update && apt-get install -y docker-ce-cli
-RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
 WORKDIR /app
 COPY requirements.txt .
