@@ -1,136 +1,85 @@
 #!/bin/bash
 
 # ==============================================================================
-#   Script de Instalación del Servicio de Auto-Escalado para n8n
+#   Script de Instalación del Autoscaler Independiente para n8n
 #
-# Versión 12.1 (Modificado para rutas correctas)
-# ==============================================================================
+# Versión 13.0
+#==================================
 
 # --- Funciones Auxiliares ---
-print_header() {
-  echo -e "\n\033[1;34m=================================================\033[0m"
-  echo -e "\033[1;34m  $1\033[0m"
-  echo -e "\033[1;34m=================================================\033[0m\n"
-}
-ask() { read -p "$1 (def: $2): " reply < /dev/tty; echo "${reply:-$2}"; }
-restore_and_exit() {
-  echo "🛡️  Restaurando 'docker-compose.yml' desde la copia de seguridad..."
-  if [ -f "$BACKUP_FILE" ]; then mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"; echo "   Restauración completa. El script se detendrá.";
-  else echo "   No se encontró un archivo de backup para restaurar."; fi
-  rm -f yq
-  exit 1
-}
+print_header() { echo -e "\n\033[1;34m=================================================\033[0m\n\033[1;34m  $1\033[0m\n\033[1;34m=================================================\033[0m\n"; }
+ask() { read -p "$1 (def: $2): " reply < /dev/tty; echo "${reply:-$default}"; }
 
 # --- Verificación de Dependencias ---
 check_deps() {
-  echo "🔎 Verificando dependencias..."
-  for cmd in docker curl wget sed; do
-    if ! command -v $cmd &>/dev/null; then echo "❌ Error: El comando '$cmd' es esencial." && exit 1; fi
-  done
-
-  if docker compose version &>/dev/null; then
-    COMPOSE_CMD_HOST="docker compose"
-  elif docker-compose version &>/dev/null; then
-    COMPOSE_CMD_HOST="docker-compose"
-  else
-    echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'." && exit 1
-  fi
-
-  echo "✅ Usaremos '$COMPOSE_CMD_HOST' para las operaciones del host."
-
-  if [ ! -f ./yq ]; then
-    echo "📥 Descargando la herramienta 'yq'..."
-    wget -q "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" -O ./yq && chmod +x ./yq || {
-      echo "❌ Falló la descarga de yq." && exit 1
-    }
-  fi
-
-  YQ_CMD="./yq"
-  echo "✅ Dependencias del host listas."
+    echo "🔎 Verificando dependencias...";
+    for cmd in docker curl wget; do
+        if ! command -v $cmd &>/dev/null; then echo "❌ Error: El comando '$cmd' es esencial." && exit 1; fi
+    done
+    if command -v docker &>/dev/null && docker compose version &>/dev/null; then
+        COMPOSE_CMD_HOST="docker compose"
+    elif command -v docker-compose &>/dev/null; then
+        COMPOSE_CMD_HOST="docker-compose"
+    else echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'." && exit 1; fi
+    echo "✅ Usaremos '$COMPOSE_CMD_HOST' para las operaciones del host."
 }
 
 # --- INICIO DEL SCRIPT ---
 clear; check_deps
-print_header "Instalador del Servicio de Auto-Escalado para n8n"
+print_header "Instalador del Autoscaler Independiente para n8n"
+echo "Asegúrate de haber configurado tu n8n principal para el modo 'queue'."
 
-# --- FASE 1: DETECCIÓN Y RECOPILACIÓN DE DATOS ---
-print_header "1. Analizando tu Entorno"
-N8N_COMPOSE_PATH="$(pwd)/docker-compose.yml"
-[ ! -f "$N8N_COMPOSE_PATH" ] && echo "❌ Error: No se encontró 'docker-compose.yml'" && exit 1
+# --- FASE 1: RECOPILACIÓN DE DATOS ---
+print_header "1. Configuración del Entorno Compartido"
+echo "Por favor, introduce los valores EXACTOS de tu stack de n8n principal."
 
-RAW_PROJECT_NAME=$(basename "$(pwd)")
-N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]//g')
-[ -z "$N8N_PROJECT_NAME" ] && N8N_PROJECT_NAME="n8n-project"
-echo "✅ Proyecto n8n detectado como: '$N8N_PROJECT_NAME'"
+# Datos del proyecto y red
+N8N_PROJECT_NAME=$(ask "Nombre de tu proyecto principal de n8n" "$(basename "$(pwd)")")
+NETWORK_KEY=$(ask "Nombre de la red en tu docker-compose principal" "n8n-network")
+SHARED_NETWORK_NAME="${N8N_PROJECT_NAME}_${NETWORK_KEY}"
+echo "ℹ️  Se asumirá que la red compartida se llama: $SHARED_NETWORK_NAME"
 
-N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval 'keys | .[]' "$N8N_COMPOSE_PATH" | grep -m1 "n8n")
-N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN_SERVICE_NAME:-n8n}")
-N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"
+# Datos de la Base de Datos
+POSTGRES_HOST=$(ask "Hostname de tu servicio Postgres" "postgres")
+POSTGRES_DB=$(ask "Nombre de la base de datos de n8n (POSTGRES_DB)" "n8n")
+POSTGRES_USER=$(ask "Usuario de Postgres (POSTGRES_USER)" "n8n")
+read -sp "Contraseña de Postgres (POSTGRES_PASSWORD): " POSTGRES_PASSWORD; echo
 
-NETWORK_KEY=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
-[ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ] && echo "❌ Error: No se pudo detectar la red." && exit 1
-echo "✅ Red de Docker detectada: '$NETWORK_KEY'"
+# Datos de n8n
+N8N_ENCRYPTION_KEY=$(ask "Clave de encriptación de n8n (N8N_ENCRYPTION_KEY)" "mi_clave_de_encriptacion_muy_larga_y_unica")
+TZ=$(ask "Tu zona horaria (TZ)" "America/Caracas")
+REDIS_HOST=$(ask "Hostname de tu servicio Redis" "redis")
 
-REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
-REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
-
-# --- FASE 2: MODIFICACIÓN SEGURA DEL DOCKER-COMPOSE ---
-print_header "2. Preparando tu Stack de n8n para Escalado"
-
-worker_exists=$($YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH")
-if [ "$worker_exists" == "true" ]; then
-  echo "✅ Tu 'docker-compose.yml' ya tiene un worker configurado."
-else
-  read -p "¿Estás de acuerdo en modificar 'docker-compose.yml'? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
-  [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]] && echo "Instalación cancelada." && exit 1
-
-  BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"
-  echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."
-  cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
-
-  echo "🔧 Modificando 'docker-compose.yml' con yq..."
-
-  $YQ_CMD eval "
-    .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [
-      \"N8N_TRUST_PROXY=true\",
-      \"N8N_RUNNERS_ENABLED=true\",
-      \"EXECUTIONS_MODE=queue\",
-      \"EXECUTIONS_PROCESS=main\",
-      \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
-    ] |
-    .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
-    .services.\"$N8N_WORKER_SERVICE_NAME\".environment |=
-      map(select(. != \"EXECUTIONS_PROCESS=main\")) |
-    .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [
-      \"EXECUTIONS_MODE=queue\",
-      \"EXECUTIONS_PROCESS=worker\",
-      \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
-    ] |
-    del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
-    del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
-    del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)
-  " "$N8N_COMPOSE_PATH" -i
-
-  echo "🔄 Reiniciando stack con nuevo worker..."
-  $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans || restore_and_exit
-  echo "✅ Tu stack ha sido actualizado con éxito."
-fi
-
-# --- FASE 3: DESPLIEGUE DEL AUTOSCALER ---
-print_header "3. Desplegando el Servicio de Auto-Escalado"
+# Datos del autoscaler
 AUTOSCALER_PROJECT_DIR="n8n-autoscaler"
+print_header "2. Configuración del Escalado"
 QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un worker" "20")
 MAX_WORKERS=$(ask "Nº máximo de workers permitidos" "5")
 MIN_WORKERS=$(ask "Nº mínimo de workers que deben mantenerse activos" "0")
 IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un worker" "60")
 TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
+
+# --- FASE 2: GENERACIÓN DE ARCHIVOS DEL AUTOSCALER ---
+print_header "3. Generando Stack del Autoscaler"
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
-echo "-> Generando archivos para el servicio autoscaler..."
+echo "-> Generando archivos en la carpeta '$AUTOSCALER_PROJECT_DIR'..."
+
 cat > .env << EOL
+# --- Configuración Compartida ---
+DB_TYPE=postgresdb
+DB_POSTGRESDB_HOST=${POSTGRES_HOST}
+DB_POSTGRESDB_PORT=5432
+DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+DB_POSTGRESDB_USER=${POSTGRES_USER}
+DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+TZ=${TZ}
+N8N_TRUST_PROXY=true
+N8N_RUNNERS_ENABLED=true
+QUEUE_BULL_REDIS_HOST=${REDIS_HOST}
+# --- Configuración del Autoscaler ---
 REDIS_HOST=${REDIS_HOST}
-N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
-N8N_WORKER_SERVICE_NAME=${N8N_WORKER_SERVICE_NAME}
 QUEUE_THRESHOLD=${QUEUE_THRESHOLD}
 MAX_WORKERS=${MAX_WORKERS}
 MIN_WORKERS=${MIN_WORKERS}
@@ -138,34 +87,46 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
+
+# docker-compose.yml (define autoscaler Y worker)
 cat > docker-compose.yml << EOL
 services:
   autoscaler:
     build: .
-    container_name: ${N8N_PROJECT_NAME}_autoscaler
+    container_name: ${N8N_PROJECT_NAME}_autoscaler_brain
     restart: always
     env_file: .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /n8n/n8n-autoscaler:/app
-      - /n8n:/project-n8n
-    working_dir: /app
     networks:
       - n8n-network
+
+  n8n-worker:
+    image: n8nio/n8n
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - EXECUTIONS_MODE=queue
+      - EXECUTIONS_PROCESS=worker
+    depends_on:
+      autoscaler:
+        condition: service_started
+    networks:
+      - n8n-network
+
 networks:
   n8n-network:
-    name: ${N8N_PROJECT_NAME}_${NETWORK_KEY}
+    name: ${SHARED_NETWORK_NAME}
     external: true
 EOL
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+    \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
     apt-get update && apt-get install -y docker-ce-cli
-RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
 WORKDIR /app
 COPY requirements.txt .
@@ -182,8 +143,11 @@ cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
 load_dotenv()
-REDIS_HOST = os.getenv('REDIS_HOST'); N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME'); N8N_WORKER_SERVICE_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
-QUEUE_KEY = f"bull:default:wait"; QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 20)); MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
+REDIS_HOST = os.getenv('REDIS_HOST');
+# El autoscaler ahora gestiona su PROPIO proyecto de compose
+AUTOSCALER_PROJECT_NAME = "n8n-autoscaler" 
+WORKER_SERVICE_NAME = "n8n-worker" 
+QUEUE_KEY = f"bull:default:wait"; QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 20)); MAX_WORKERS = int(os.getenv('MAX_WORKers', 5))
 MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0)); IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 60))
 POLL_INTERVAL = 10; TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN'); TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 COMPOSE_CMD = "/usr/local/bin/docker-compose"
@@ -197,21 +161,21 @@ def send_telegram_notification(message):
     except requests.exceptions.RequestException: pass
 def run_docker_command(command):
     try:
-        full_command = f"{COMPOSE_CMD} -p {N8N_PROJECT_NAME} {command}"; result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
+        full_command = f"{COMPOSE_CMD} -p {AUTOSCALER_PROJECT_NAME} {command}"; result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
         print(f"❌ Error ejecutando: {full_command}\n   Error: {e.stderr.strip()}"); send_telegram_notification(f"‼️ *Error Crítico de Docker*\n_{e.stderr.strip()}_"); return None
 def get_running_workers():
-    output = run_docker_command(f"ps -q {N8N_WORKER_SERVICE_NAME}"); return -1 if output is None else len(output.splitlines()) if output else 0
+    output = run_docker_command(f"ps -q {WORKER_SERVICE_NAME}"); return -1 if output is None else len(output.splitlines()) if output else 0
 def scale_workers(desired_count):
     current_workers = get_running_workers()
     if current_workers == -1 or current_workers == desired_count: return
     print(f"⚖️  Escalando workers de {current_workers} a {desired_count}...")
-    command = f"up -d --scale {N8N_WORKER_SERVICE_NAME}={desired_count} --no-recreate --remove-orphans"
+    command = f"up -d --scale {WORKER_SERVICE_NAME}={desired_count} --no-recreate --remove-orphans"
     if run_docker_command(command) is not None: send_telegram_notification(f"✅ Auto-escalado. *Workers activos: {desired_count}*")
     else: send_telegram_notification(f"❌ *Error al escalar workers a {desired_count}*")
 if __name__ == "__main__":
-    send_telegram_notification(f"🤖 El servicio de auto-escalado para *{N8N_PROJECT_NAME}* ha sido iniciado.")
+    send_telegram_notification(f"🤖 El servicio de auto-escalado independiente ha sido iniciado.")
     idle_since = None
     while True:
         try:
@@ -226,18 +190,18 @@ if __name__ == "__main__":
             elif queue_size > MIN_WORKERS: idle_since = None
             time.sleep(POLL_INTERVAL)
         except redis.exceptions.RedisError as e: print(f"⚠️ Error de Redis: {e}. Reintentando..."); time.sleep(POLL_INTERVAL * 2)
-        except KeyboardInterrupt: send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
-        except Exception as e: print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
+        except KeyboardInterrupt: send_telegram_notification(f"🤖 Servicio de auto-escalado detenido."); break
+        except Exception as e: print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 EOL
 
-echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
-echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
+# --- LIMPIEZA Y DESPLIEGUE FINAL ---
+echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler_brain" > /dev/null 2>&1
+echo "🚀 Desplegando el stack del autoscaler..."; $COMPOSE_CMD_HOST up -d --build
+
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"; cd ..
-    echo "Tu stack ha sido configurado y el servicio de auto-escalado está en funcionamiento."; echo ""
-    echo "Pasos siguientes:"; echo "  1. Verifica con 'cat docker-compose.yml' que el archivo fue modificado."; echo "  2. Verifica los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
+    echo "El servicio de auto-escalado independiente está en funcionamiento."; echo ""
+    echo "Pasos siguientes:"; echo "  1. Verifica los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler_brain"
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
-rm -f ./yq
-echo -e "\nGracias por usar este instalador. ¡Disfruta de tu servicio de auto-escalado para n8n! 🎉"
