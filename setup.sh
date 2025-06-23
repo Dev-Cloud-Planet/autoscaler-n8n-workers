@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n
 #
-# Versión 11.0
+# Versión 11.0 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -13,7 +13,6 @@ restore_and_exit() {
     echo "🛡️  Restaurando 'docker-compose.yml' desde la copia de seguridad...";
     if [ -f "$BACKUP_FILE" ]; then mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"; echo "   Restauración completa. El script se detendrá.";
     else echo "   No se encontró un archivo de backup para restaurar."; fi
-    # Limpieza de archivos temporales
     rm -f patch.yml new-compose.yml yq
     exit 1
 }
@@ -52,9 +51,11 @@ echo "✅ Proyecto n8n detectado como: '$N8N_PROJECT_NAME'"
 N8N_MAIN_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "n8nio/n8n*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${N8N_MAIN_SERVICE_NAME:-n8n}")
 N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"
+
 NETWORK_KEY=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$NETWORK_KEY" ] || [ "$NETWORK_KEY" == "null" ]; then echo "❌ Error: No se pudo detectar la red para '$N8N_MAIN_SERVICE_NAME'." && exit 1; fi
 echo "✅ Red de Docker detectada: '$NETWORK_KEY'"
+
 REDIS_SERVICE_NAME=$($YQ_CMD eval '(.services[] | select(.image == "redis*") | key)' "$N8N_COMPOSE_PATH" | head -n 1)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${REDIS_SERVICE_NAME:-redis}")
 
@@ -70,11 +71,10 @@ else
     
     echo "🔧 Generando parche de configuración..."
     
-    # Extraer la configuración base del servicio n8n principal
+    # Extraer la configuración base del servicio n8n principal para clonarla
     N8N_BASE_CONFIG=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH")
     
     # Crear el archivo patch.yml con las modificaciones
-    # Usamos 'cat << EOL' para que las variables como $REDIS_HOST se expandan
     cat << EOL > patch.yml
 services:
   ${N8N_MAIN_SERVICE_NAME}:
@@ -85,7 +85,19 @@ services:
       - EXECUTIONS_PROCESS=main
       - QUEUE_BULL_REDIS_HOST=${REDIS_HOST}
   ${N8N_WORKER_SERVICE_NAME}:
-$(echo "$N8N_BASE_CONFIG" | $YQ_CMD eval '.restart = "unless-stopped" | del(.ports) | del(.labels) | del(.container_name) | .environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=worker", "QUEUE_BULL_REDIS_HOST='${REDIS_HOST}'", "N8N_TRUST_PROXY=true", "N8N_RUNNERS_ENABLED=true"]' - | sed 's/^/    /')
+$(echo "$N8N_BASE_CONFIG" | $YQ_CMD eval '
+    .restart = "unless-stopped" |
+    del(.ports) |
+    del(.labels) |
+    del(.container_name) |
+    .environment += [
+        "N8N_TRUST_PROXY=true",
+        "N8N_RUNNERS_ENABLED=true",
+        "EXECUTIONS_MODE=queue",
+        "EXECUTIONS_PROCESS=worker",
+        "QUEUE_BULL_REDIS_HOST='${REDIS_HOST}'"
+    ]
+' - | sed 's/^/    /')
 EOL
 
     echo "⚙️  Aplicando parche..."
@@ -106,7 +118,8 @@ EOL
     fi
 fi
 
-# --- FASE 3: DESPLIEGUE DEL SERVICIO DE AUTO-ESCALADO ---
+# --- FASE 3: DESPLIEGUE DEL AUTOSCALER ---
+# (Esta sección es estable y no requiere cambios)
 print_header "3. Desplegando el Servicio de Auto-Escalado"
 AUTOSCALER_PROJECT_DIR="n8n-autoscaler"
 QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un worker" "20")
@@ -226,6 +239,7 @@ EOL
 
 echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
 echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
+
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"; cd ..
     echo "Tu stack ha sido configurado y el servicio de auto-escalado está en funcionamiento."; echo ""
@@ -234,4 +248,4 @@ else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
 # Limpieza final
-rm -f ./yq patch.yml new-compose.yml
+rm -f ./yq patch.yml
