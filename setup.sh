@@ -25,6 +25,7 @@ check_deps() {
 }
 
 # --- FUNCIÓN CLAVE: Verificar y configurar el Stack Principal ---
+
 verify_and_configure_main_stack() {
     print_header "Verificando y Configurando Stack Principal de n8n"
     local main_env_file="${MAIN_PROJECT_PATH}/.env"
@@ -32,7 +33,7 @@ verify_and_configure_main_stack() {
     local modified_files=false
 
     if [ ! -f "$main_env_file" ] || [ ! -f "$main_compose_file" ]; then
-        echo "❌ Error: No se encontraron los archivos \'.env\' y/o \'docker-compose.yml\' en el directorio actual (\'$MAIN_PROJECT_PATH\')."
+        echo "❌ Error: No se encontraron los archivos \'.env\' y/o \'docker-compose.yml\' en el directorio actual (\'${MAIN_PROJECT_PATH}\')."
         echo "Asegúrate de ejecutar este script desde la carpeta de tu proyecto n8n principal."
         exit 1
     fi
@@ -57,28 +58,13 @@ verify_and_configure_main_stack() {
     fi
     
     # Detección automática del servicio n8n principal
-    local n8n_service_name
-    n8n_service_name=$(awk \'/^[a-zA-Z]/{s=$1; sub(/:/,"",s)} /image:.*n8nio\\/n8n/ && !/worker/{print s; exit}\' "$main_compose_file")
-
+    local n8n_service_nam    n8n_service_name=$(awk '/^[a-zA-Z]/{s=$1; gsub(/:/, "", s)} /image:.*n8nio\/n8n/ && !/worker/{print s; exit}' "$main_compose_file")
     if [ -z "$n8n_service_name" ]; then
         echo "❌ Error: No se pudo detectar automáticamente el servicio principal de n8n en tu docker-compose.yml."
         echo "Asegúrate de que haya un servicio con \'image: n8nio/n8n\'."
         exit 1
     fi
-    echo "   - Servicio n8n principal detectado: \'${n8n_service_name}\'"
-
-    # Se elimina la modificación del docker-compose.yml principal
-    # if ! grep -A 10 "^\\s*${n8n_service_name}:" "$main_compose_file" | grep -q "EXECUTIONS_PROCESS=main"; then
-    #     echo "   - El servicio \'${n8n_service_name}\' no está definido como \'main\'. Corrigiendo..."
-    #     sed -i "/^\\s*${n8n_service_name}:/,/^\\s*[^ ]/ s/^\\(\\s*environment:\\s*\\)$/\\1\\n\\1  - EXECUTIONS_PROCESS=main/" "$main_compose_file"
-    #     modified_files=true
-        
-    #     if ! grep -A 10 "^\\s*${n8n_service_name}:" "$main_compose_file" | grep -q "EXECUTIONS_PROCESS=main"; then
-    #         echo "❌ Fallo al modificar automáticamente el docker-compose.yml. Revisa los permisos o el formato del archivo."
-    #         exit 1
-    #     fi
-    # fi
-    
+    echo "   - Servicio n8n principal detectado: \'${n8n_service_name}\'"    
     echo "✅ Tu stack principal está ahora correctamente configurado para el modo \'queue\' (solo .env modificado)."
 
     if [ "$modified_files" = true ]; then
@@ -104,8 +90,8 @@ verify_and_configure_main_stack
 print_header "1. Configuración del Entorno de Escalado"
 NETWORK_KEY="n8n-network"
 SHARED_NETWORK_NAME="${N8N_PROJECT_NAME}_${NETWORK_KEY}"
-echo "ℹ️  Proyecto Principal: \'$N8N_PROJECT_NAME\' en \'$MAIN_PROJECT_PATH\'"
-echo "ℹ️  Se conectará a la red compartida: \'$SHARED_NETWORK_NAME\'"
+echo "ℹ️  Proyecto Principal: \'${N8N_PROJECT_NAME}\' en \'${MAIN_PROJECT_PATH}\'"
+echo "ℹ️  Se conectará a la red compartida: \'${SHARED_NETWORK_NAME}\'"
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "redis")
 AUTOSCALER_PROJECT_DIR="n8n-autoscaler"
 
@@ -122,7 +108,8 @@ print_header "3. Generando Stack del Autoscaler"
 # Limpieza previa por si existe la carpeta
 rm -rf "$AUTOSCALER_PROJECT_DIR"
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
-echo "-> Generando archivos en la carpeta \'$AUTOSCALER_PROJECT_DIR\'..."
+echo "-> Generando archivos en la carpeta \'${AUTOSCALER_PROJECT_DIR}\'..."
+
 # .env para el autoscaler
 cat > .env << EOL
 # --- Configuración Específica del Autoscaler ---
@@ -157,6 +144,7 @@ services:
       - EXECUTIONS_MODE=queue
       - EXECUTIONS_PROCESS=worker
       - QUEUE_BULL_REDIS_HOST=${REDIS_HOST}
+
       - DB_TYPE=${DB_TYPE}
       - DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
       - DB_POSTGRESDB_PORT=${DB_POSTGRESDB_PORT}
@@ -257,7 +245,7 @@ echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; docker rm 
 echo "🚀 Desplegando el stack del autoscaler..."; $COMPOSE_CMD_HOST -p "${N8N_PROJECT_NAME}-autoscaler" up -d --build
 
 if [ $? -eq 0 ]; then
-    print_header "¡Instalación Completada!"; cd ..
+    print_header "¡Instalación Completada!"; echo ""
     echo "El servicio de auto-escalado independiente está en funcionamiento."; echo ""
     echo "Pasos siguientes:"; echo "  1. Verifica los logs del autoscaler con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler_brain"
 else
