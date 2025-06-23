@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación del Servicio de Auto-Escalado para n8n
 #
-# Versión 12.1
+# Versión 12.1 (Modificado para rutas correctas)
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -147,7 +147,8 @@ services:
     env_file: .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /n8n:/app
+      - /n8n/n8n-autoscaler:/app
+      - /n8n:/project-n8n
     working_dir: /app
     networks:
       - n8n-network
@@ -239,3 +240,4 @@ else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
 rm -f ./yq
+echo -e "\nGracias por usar este instalador. ¡Disfruta de tu servicio de auto-escalado para n8n! 🎉"
