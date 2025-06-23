@@ -3,12 +3,11 @@
 # ==============================================================================
 #   Script de Instalación del Autoscaler Independiente para n8n
 #
-# Versión 16.0 - El Automatizador
+# Versión 17.0 - El Deteccionista
 #
-# - [MEJORA] Ya no pide al usuario editar archivos. Modifica el .env y el
-#   docker-compose.yml principal de forma automática.
-# - Valida y configura el stack principal para modo 'queue'.
-# - El worker hereda la configuración directamente del .env principal.
+# - [MEJORA] Detecta automáticamente el nombre del servicio n8n principal.
+#   No más preguntas al usuario. Es 100% automático.
+# - Modifica el .env y el docker-compose.yml principal según sea necesario.
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -18,7 +17,7 @@ ask() { read -p "$1 (def: $2): " reply < /dev/tty; default_val="$2"; echo "${rep
 # --- Verificación de Dependencias ---
 check_deps() {
     echo "🔎 Verificando dependencias...";
-    for cmd in docker curl wget sed; do
+    for cmd in docker curl wget sed awk; do
         if ! command -v $cmd &>/dev/null; then echo "❌ Error: El comando '$cmd' es esencial." && exit 1; fi
     done
     if command -v docker &>/dev/null && docker compose version &>/dev/null; then
@@ -61,16 +60,22 @@ verify_and_configure_main_stack() {
         exit 1
     fi
     
+    # Detección automática del servicio n8n principal
     local n8n_service_name
-    n8n_service_name=$(ask "Confirma el nombre de tu servicio n8n principal en docker-compose.yml" "n8n")
+    n8n_service_name=$(awk '/^[a-zA-Z]/{s=$1; sub(/:/,"",s)} /image:.*n8nio\/n8n/ && !/worker/{print s; exit}' "$main_compose_file")
+
+    if [ -z "$n8n_service_name" ]; then
+        echo "❌ Error: No se pudo detectar automáticamente el servicio principal de n8n en tu docker-compose.yml."
+        echo "Asegúrate de que haya un servicio con 'image: n8nio/n8n'."
+        exit 1
+    fi
+    echo "   - Servicio n8n principal detectado: '${n8n_service_name}'"
 
     if ! grep -A 10 "^\s*${n8n_service_name}:" "$main_compose_file" | grep -q "EXECUTIONS_PROCESS=main"; then
         echo "   - El servicio '${n8n_service_name}' no está definido como 'main'. Corrigiendo..."
-        # Usamos sed para añadir la línea con la indentación correcta después de 'environment:'
         sed -i "/^\s*${n8n_service_name}:/,/^\s*[^ ]/ s/^\(\s*environment:\s*\)$/\1\n\1  - EXECUTIONS_PROCESS=main/" "$main_compose_file"
         modified_files=true
         
-        # Verificación final
         if ! grep -A 10 "^\s*${n8n_service_name}:" "$main_compose_file" | grep -q "EXECUTIONS_PROCESS=main"; then
             echo "❌ Fallo al modificar automáticamente el docker-compose.yml. Revisa los permisos o el formato del archivo."
             exit 1
@@ -117,6 +122,8 @@ TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
 
 # --- FASE 2: GENERACIÓN DE ARCHIVOS DEL AUTOSCALER ---
 print_header "3. Generando Stack del Autoscaler"
+# Limpieza previa por si existe la carpeta
+rm -rf "$AUTOSCALER_PROJECT_DIR"
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
 echo "-> Generando archivos en la carpeta '$AUTOSCALER_PROJECT_DIR'..."
 
@@ -165,7 +172,7 @@ networks:
     external: true
 EOL
 
-# Dockerfile, requirements.txt y autoscaler.py (sin cambios respecto a la v15)
+# Dockerfile, requirements.txt y autoscaler.py (sin cambios)
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
