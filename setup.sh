@@ -3,13 +3,12 @@
 # ==============================================================================
 #   Script de Instalación del Autoscaler Independiente para n8n
 #
-# Versión 15.0 - Verificación y Configuración Activa
+# Versión 16.0 - El Automatizador
 #
-# - [NUEVO] Verifica y configura el stack principal para modo 'queue'.
-# - [NUEVO] Añade automáticamente variables al .env si faltan.
-# - [NUEVO] Valida el docker-compose.yml principal antes de continuar.
+# - [MEJORA] Ya no pide al usuario editar archivos. Modifica el .env y el
+#   docker-compose.yml principal de forma automática.
+# - Valida y configura el stack principal para modo 'queue'.
 # - El worker hereda la configuración directamente del .env principal.
-# - El autoscaler ahora conoce la ruta absoluta a su propio docker-compose.
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -19,7 +18,7 @@ ask() { read -p "$1 (def: $2): " reply < /dev/tty; default_val="$2"; echo "${rep
 # --- Verificación de Dependencias ---
 check_deps() {
     echo "🔎 Verificando dependencias...";
-    for cmd in docker curl wget; do
+    for cmd in docker curl wget sed; do
         if ! command -v $cmd &>/dev/null; then echo "❌ Error: El comando '$cmd' es esencial." && exit 1; fi
     done
     if command -v docker &>/dev/null && docker compose version &>/dev/null; then
@@ -30,9 +29,9 @@ check_deps() {
     echo "✅ Usaremos '$COMPOSE_CMD_HOST' para las operaciones del host."
 }
 
-# --- NUEVA FUNCIÓN: Verificar y configurar el Stack Principal ---
+# --- FUNCIÓN CLAVE: Verificar y configurar el Stack Principal ---
 verify_and_configure_main_stack() {
-    print_header "Verificando Stack Principal de n8n"
+    print_header "Verificando y Configurando Stack Principal de n8n"
     local main_env_file="${MAIN_PROJECT_PATH}/.env"
     local main_compose_file="${MAIN_PROJECT_PATH}/docker-compose.yml"
     local modified_files=false
@@ -43,47 +42,52 @@ verify_and_configure_main_stack() {
         exit 1
     fi
 
-    # 1. Verificar y corregir .env
     echo "-> Revisando '${main_env_file}'..."
     if ! grep -q "^EXECUTIONS_MODE=queue" "$main_env_file"; then
-        echo "   - No se encontró 'EXECUTIONS_MODE=queue'. Añadiéndola..."
+        echo "   - Configurando 'EXECUTIONS_MODE=queue'..."
         echo -e "\n# --- Añadido por el script del Autoscaler ---\nEXECUTIONS_MODE=queue" >> "$main_env_file"
         modified_files=true
     fi
     if ! grep -q "^QUEUE_BULL_REDIS_HOST=" "$main_env_file"; then
-        echo "   - No se encontró 'QUEUE_BULL_REDIS_HOST'. Añadiéndola..."
+        echo "   - Configurando 'QUEUE_BULL_REDIS_HOST=redis'..."
         echo "QUEUE_BULL_REDIS_HOST=redis" >> "$main_env_file"
         modified_files=true
     fi
 
-    # 2. Validar docker-compose.yml (no modificar, solo avisar)
-    echo "-> Validando '${main_compose_file}'..."
+    echo "-> Validando y corrigiendo '${main_compose_file}'..."
     if ! grep -q "redis:" "$main_compose_file"; then
-        echo -e "\n❌ Error Crítico: Tu archivo '$main_compose_file' no parece tener un servicio 'redis'."
-        echo "El modo 'queue' requiere Redis. Por favor, añade un servicio Redis a tu compose y vuelve a intentarlo."
-        exit 1
-    fi
-    if ! grep -q "EXECUTIONS_PROCESS=main" "$main_compose_file"; then
-        echo -e "\n❌ Error Crítico: A tu servicio principal de 'n8n' le falta la variable de entorno 'EXECUTIONS_PROCESS=main'."
-        echo "Es VITAL para que el contenedor principal gestione la cola y no actúe como un worker."
-        echo "Por favor, añade lo siguiente bajo 'environment:' en tu servicio 'n8n':"
-        echo -e "\n      - EXECUTIONS_PROCESS=main\n"
+        echo -e "\n❌ Error Crítico: Tu '$main_compose_file' no tiene un servicio 'redis'."
+        echo "El modo 'queue' requiere Redis. Por favor, añade un servicio Redis y vuelve a intentarlo."
         exit 1
     fi
     
-    echo "✅ Tu stack principal parece estar correctamente configurado para el modo 'queue'."
+    local n8n_service_name
+    n8n_service_name=$(ask "Confirma el nombre de tu servicio n8n principal en docker-compose.yml" "n8n")
 
-    # 3. Si se modificó algo, forzar reinicio
+    if ! grep -A 10 "^\s*${n8n_service_name}:" "$main_compose_file" | grep -q "EXECUTIONS_PROCESS=main"; then
+        echo "   - El servicio '${n8n_service_name}' no está definido como 'main'. Corrigiendo..."
+        # Usamos sed para añadir la línea con la indentación correcta después de 'environment:'
+        sed -i "/^\s*${n8n_service_name}:/,/^\s*[^ ]/ s/^\(\s*environment:\s*\)$/\1\n\1  - EXECUTIONS_PROCESS=main/" "$main_compose_file"
+        modified_files=true
+        
+        # Verificación final
+        if ! grep -A 10 "^\s*${n8n_service_name}:" "$main_compose_file" | grep -q "EXECUTIONS_PROCESS=main"; then
+            echo "❌ Fallo al modificar automáticamente el docker-compose.yml. Revisa los permisos o el formato del archivo."
+            exit 1
+        fi
+    fi
+    
+    echo "✅ Tu stack principal está ahora correctamente configurado para el modo 'queue'."
+
     if [ "$modified_files" = true ]; then
         echo -e "\n\033[1;33m⚠️ ¡ACCIÓN REQUERIDA!\033[0m"
-        echo "Hemos añadido configuraciones a tu archivo '.env' para habilitar el modo 'queue'."
-        echo "Debes reiniciar tu stack de n8n para que los cambios surtan efecto."
+        echo "Hemos modificado tus archivos de configuración (.env y/o docker-compose.yml)."
+        echo "Es indispensable que reinicies tu stack de n8n para que los cambios surtan efecto."
         echo -e "Ejecuta el siguiente comando en otra terminal:\n"
         echo -e "  \033[1;32mcd ${MAIN_PROJECT_PATH} && ${COMPOSE_CMD_HOST} down && ${COMPOSE_CMD_HOST} up -d\033[0m\n"
-        read -p "Una vez que tu stack principal se haya reiniciado, presiona [Enter] para continuar con la instalación del autoscaler..."
+        read -p "Una vez que tu stack principal se haya reiniciado, presiona [Enter] para instalar el autoscaler..."
     fi
 }
-
 
 # --- INICIO DEL SCRIPT ---
 clear; check_deps
@@ -93,19 +97,17 @@ print_header "Instalador del Autoscaler Independiente para n8n"
 MAIN_PROJECT_PATH=$(pwd)
 N8N_PROJECT_NAME=$(basename "$MAIN_PROJECT_PATH")
 
-# Llamada a la nueva función de verificación
 verify_and_configure_main_stack
 
 print_header "1. Configuración del Entorno de Escalado"
-NETWORK_KEY="n8n-network" # Nombre de la red en el compose principal
+NETWORK_KEY="n8n-network"
 SHARED_NETWORK_NAME="${N8N_PROJECT_NAME}_${NETWORK_KEY}"
 echo "ℹ️  Proyecto Principal: '$N8N_PROJECT_NAME' en '$MAIN_PROJECT_PATH'"
 echo "ℹ️  Se conectará a la red compartida: '$SHARED_NETWORK_NAME'"
-
-REDIS_HOST=$(ask "Hostname de tu servicio Redis (debe coincidir con el compose principal)" "redis")
+REDIS_HOST=$(ask "Hostname de tu servicio Redis" "redis")
 AUTOSCALER_PROJECT_DIR="n8n-autoscaler"
 
-print_header "2. Configuración de los Parámetros de Escalado"
+print_header "2. Configuración de Parámetros de Escalado"
 QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un worker" "20")
 MAX_WORKERS=$(ask "Nº máximo de workers permitidos" "5")
 MIN_WORKERS=$(ask "Nº mínimo de workers que deben mantenerse activos" "0")
@@ -129,14 +131,12 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 AUTOSCALER_COMPOSE_FILE=/app/docker-compose.yml
-# Pasamos el nombre del proyecto principal para que el autoscaler sepa cómo nombrarse
 N8N_PROJECT_NAME=${N8N_PROJECT_NAME}
 EOL
 
 # docker-compose.yml para el autoscaler
 cat > docker-compose.yml << EOL
 version: '3.8'
-
 services:
   autoscaler:
     build: .
@@ -148,7 +148,6 @@ services:
       - ./docker-compose.yml:/app/docker-compose.yml:ro
     networks:
       - n8n_shared_network
-
   n8n-worker:
     image: n8nio/n8n
     restart: unless-stopped
@@ -160,14 +159,13 @@ services:
       - QUEUE_BULL_REDIS_HOST=${REDIS_HOST}
     networks:
       - n8n_shared_network
-
 networks:
   n8n_shared_network:
     name: ${SHARED_NETWORK_NAME}
     external: true
 EOL
 
-# Dockerfile
+# Dockerfile, requirements.txt y autoscaler.py (sin cambios respecto a la v15)
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
@@ -180,34 +178,27 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY autoscaler.py .
 CMD ["python", "-u", "autoscaler.py"]
 EOL
-
-# requirements.txt
 cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
-
-# autoscaler.py
 cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
 load_dotenv()
-# --- Configuración ---
 REDIS_HOST = os.getenv('REDIS_HOST')
 MAIN_N8N_PROJECT_NAME = os.getenv('N8N_PROJECT_NAME', 'n8n')
 AUTOSCALER_PROJECT_NAME = f"{MAIN_N8N_PROJECT_NAME}-autoscaler"
-WORKER_SERVICE_NAME = "n8n-worker" 
+WORKER_SERVICE_NAME = "n8n-worker"
 COMPOSE_FILE_PATH = os.getenv('AUTOSCALER_COMPOSE_FILE', '/app/docker-compose.yml')
 QUEUE_KEY = "bull:default:wait"; QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 20)); MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
 MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0)); IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 60))
 POLL_INTERVAL = 10; TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN'); TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 COMPOSE_CMD = "/usr/local/bin/docker-compose"
-# --- Cliente Redis ---
 try:
     redis_client = redis.Redis(host=REDIS_HOST, decode_responses=True, socket_connect_timeout=10); redis_client.ping(); print(f"✅ Conexión con Redis ('{REDIS_HOST}') establecida con éxito.")
 except redis.exceptions.RedisError as e: print(f"❌ Error fatal al conectar con Redis: {e}"); exit(1)
-# --- Funciones Auxiliares ---
 def send_telegram_notification(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"; payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
@@ -227,13 +218,11 @@ def scale_workers(desired_count):
     if current_workers == -1 or current_workers == desired_count: return
     print(f"⚖️  Escalando workers de {current_workers} a {desired_count}...")
     command = f"up -d --scale {WORKER_SERVICE_NAME}={desired_count} --no-recreate --remove-orphans"
-    if run_docker_command(command) is not None: send_telegram_notification(f"✅ Auto-escalado. *Workers activos: {desired_count}*")
+    if run_docker_command(command) is not None: send_telegram_notification(f"✅ Auto-escalado para *{MAIN_N8N_PROJECT_NAME}*. Workers: {desired_count}")
     else: send_telegram_notification(f"❌ *Error al escalar workers a {desired_count}*")
-# --- Bucle Principal ---
 if __name__ == "__main__":
     send_telegram_notification(f"🤖 El servicio de auto-escalado para *{MAIN_N8N_PROJECT_NAME}* ha sido iniciado.")
-    idle_since = None
-    time.sleep(5) # Dar un pequeño margen al inicio
+    idle_since = None; time.sleep(5)
     scale_workers(MIN_WORKERS)
     while True:
         try:
@@ -260,7 +249,7 @@ echo "🚀 Desplegando el stack del autoscaler..."; $COMPOSE_CMD_HOST -p "${N8N_
 if [ $? -eq 0 ]; then
     print_header "¡Instalación Completada!"; cd ..
     echo "El servicio de auto-escalado independiente está en funcionamiento."; echo ""
-    echo "Pasos siguientes:"; echo "  1. Verifica que tu stack principal sigue corriendo con '${COMPOSE_CMD_HOST} ps'."; echo "  2. Verifica los logs del autoscaler con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler_brain"
+    echo "Pasos siguientes:"; echo "  1. Verifica los logs del autoscaler con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler_brain"
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
