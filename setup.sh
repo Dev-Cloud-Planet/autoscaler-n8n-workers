@@ -103,7 +103,6 @@ EOL
         echo "✅ Nueva configuración generada y verificada con éxito."
         mv new-compose.yml "$N8N_COMPOSE_PATH"
         
-        # --- PASO CRÍTICO AÑADIDO ---
         echo "🔄 Aplicando la nueva configuración al stack de n8n..."
         $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans
         if [ $? -ne 0 ]; then
@@ -119,7 +118,6 @@ EOL
 fi
 
 # --- FASE 3: DESPLIEGUE DEL AUTOSCALER ---
-# (Esta sección es estable y no requiere cambios)
 print_header "3. Desplegando el Servicio de Auto-Escalado"
 AUTOSCALER_PROJECT_DIR="n8n-autoscaler"
 QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un worker" "20")
@@ -130,9 +128,8 @@ TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
 mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
 
-# --- Generación de archivos del autoscaler (sin cambios) ---
+# --- Generación de archivos del autoscaler ---
 echo "-> Generando archivos para el servicio autoscaler..."
-# .env
 cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
@@ -144,7 +141,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
-# docker-compose.yml
+
 cat > docker-compose.yml << EOL
 services:
   autoscaler:
@@ -161,16 +158,16 @@ networks:
     name: ${N8N_PROJECT_NAME}_${NETWORK_KEY}
     driver: bridge
 EOL
-# Dockerfile
+
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-    echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
-    \$(. /etc/os-release && echo "\$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
     apt-get update && apt-get install -y docker-ce-cli
-RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose && \
+RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
 WORKDIR /app
 COPY requirements.txt .
@@ -178,13 +175,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY autoscaler.py .
 CMD ["python", "-u", "autoscaler.py"]
 EOL
-# requirements.txt
+
 cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
-# autoscaler.py
+
 cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
@@ -247,5 +244,5 @@ if [ $? -eq 0 ]; then
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
-# Limpieza final
+
 rm -f ./yq patch.yml
