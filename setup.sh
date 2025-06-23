@@ -88,34 +88,34 @@ else
   echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."
   cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
 
-  echo "🔧 Generando bloque para el worker..."
-  $YQ_CMD eval ".services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH" |
+  echo "🔧 Modificando 'docker-compose.yml' con yq..."
+
   $YQ_CMD eval "
     .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [
       \"N8N_TRUST_PROXY=true\",
       \"N8N_RUNNERS_ENABLED=true\",
       \"EXECUTIONS_MODE=queue\",
       \"EXECUTIONS_PROCESS=main\",
-      \"QUEUE_BULL_REDIS_HOST=${REDIS_HOST}\"
+      \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
     ] |
+    .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
+    .services.\"$N8N_WORKER_SERVICE_NAME\".environment |=
+      map(select(. != \"EXECUTIONS_PROCESS=main\")) |
     .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [
-      \"N8N_TRUST_PROXY=true\",
-      \"N8N_RUNNERS_ENABLED=true\",
       \"EXECUTIONS_MODE=queue\",
       \"EXECUTIONS_PROCESS=worker\",
-      \"QUEUE_BULL_REDIS_HOST=${REDIS_HOST}\"
+      \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
     ] |
     del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
     del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
     del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)
-  " - > "$N8N_COMPOSE_PATH.tmp"
-
-  mv "$N8N_COMPOSE_PATH.tmp" "$N8N_COMPOSE_PATH"
+  " "$N8N_COMPOSE_PATH" -i
 
   echo "🔄 Reiniciando stack con nuevo worker..."
   $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans || restore_and_exit
   echo "✅ Tu stack ha sido actualizado con éxito."
 fi
+
 
 # --- FASE 3: DESPLIEGUE DEL AUTOSCALER ---
 print_header "3. Desplegando el Servicio de Auto-Escalado"
