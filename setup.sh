@@ -147,6 +147,7 @@ services:
     env_file: .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /n8n:/app
     networks:
       - n8n-network
 networks:
