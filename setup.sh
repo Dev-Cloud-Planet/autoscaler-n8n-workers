@@ -81,7 +81,7 @@ worker_exists=$($YQ_CMD eval ".services | has(\"$N8N_WORKER_SERVICE_NAME\")" "$N
 if [ "$worker_exists" == "true" ]; then
   echo "✅ Tu 'docker-compose.yml' ya tiene un worker configurado."
 else
-  read -p "¿Estás de acuerdo en modificar 'docker-compose.yml'? (y/N): " confirm_modify < /dev/tty
+  read -p "¿Estás de acuerdo en modificar 'docker-compose.yml'? (Se creará una copia de seguridad) (y/N): " confirm_modify < /dev/tty
   [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]] && echo "Instalación cancelada." && exit 1
 
   BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"
@@ -115,7 +115,6 @@ else
   $COMPOSE_CMD_HOST up -d --force-recreate --remove-orphans || restore_and_exit
   echo "✅ Tu stack ha sido actualizado con éxito."
 fi
-
 
 # --- FASE 3: DESPLIEGUE DEL AUTOSCALER ---
 print_header "3. Desplegando el Servicio de Auto-Escalado"
