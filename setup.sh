@@ -117,10 +117,17 @@ else
 fi
 
 # --- FASE 3: DESPLIEGUE DEL AUTOSCALER ---
-print_header "4. Creando y Desplegando Servicio de Auto-Escalado (Separado)"
-AUTOSCALER_DIR="n8n-autoscaler"
-mkdir -p "$AUTOSCALER_DIR"
-cat > "$AUTOSCALER_DIR/.env" << EOL
+print_header "3. Desplegando el Servicio de Auto-Escalado"
+AUTOSCALER_PROJECT_DIR="n8n-autoscaler"
+QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un worker" "20")
+MAX_WORKERS=$(ask "Nº máximo de workers permitidos" "5")
+MIN_WORKERS=$(ask "Nº mínimo de workers que deben mantenerse activos" "0")
+IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un worker" "60")
+TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" "")
+TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
+mkdir -p "$AUTOSCALER_PROJECT_DIR" && cd "$AUTOSCALER_PROJECT_DIR" || exit
+echo "-> Generando archivos para el servicio autoscaler..."
+cat > .env << EOL
 REDIS_HOST=${REDIS_HOST}
 N8N_DOCKER_PROJECT_NAME=${N8N_PROJECT_NAME}
 N8N_WORKER_SERVICE_NAME=${N8N_WORKER_SERVICE_NAME}
@@ -131,8 +138,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN=${IDLE_TIME_BEFORE_SCALE_DOWN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
-
-cat > "$AUTOSCALER_DIR/docker-compose.yml" << EOL
+cat > docker-compose.yml << EOL
 services:
   autoscaler:
     build: .
@@ -141,18 +147,17 @@ services:
     env_file: .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - \$(pwd)/$AUTOSCALER_DIR:/app
-      - \$(pwd):/project-n8n
+      - /n8n/n8n-autoscaler:/app
+      - /n8n:/project-n8n
     working_dir: /app
     networks:
       - n8n-network
 networks:
   n8n-network:
-    external: true
     name: ${N8N_PROJECT_NAME}_${NETWORK_KEY}
+    external: true
 EOL
-
-cat > "$AUTOSCALER_DIR/Dockerfile" << 'EOL'
+cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
@@ -168,122 +173,71 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY autoscaler.py .
 CMD ["python", "-u", "autoscaler.py"]
 EOL
-
-cat > "$AUTOSCALER_DIR/requirements.txt" << 'EOL'
+cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
-
-cat > "$AUTOSCALER_DIR/autoscaler.py" << 'EOL'
+cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
 load_dotenv()
-REDIS_HOST = os.getenv('REDIS_HOST')
-N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME')
-N8N_WORKER_SERVICE_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
-QUEUE_KEY = f"bull:default:wait"
-QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 20))
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
-MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0))
-IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 60))
-POLL_INTERVAL = 10
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+REDIS_HOST = os.getenv('REDIS_HOST'); N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME'); N8N_WORKER_SERVICE_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
+QUEUE_KEY = f"bull:default:wait"; QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 20)); MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
+MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0)); IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 60))
+POLL_INTERVAL = 10; TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN'); TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 COMPOSE_CMD = "/usr/local/bin/docker-compose"
-COMPOSE_FILE = "/project-n8n/docker-compose.yml"
-
 try:
-    redis_client = redis.Redis(host=REDIS_HOST, decode_responses=True, socket_connect_timeout=5)
-    redis_client.ping()
-    print("✅ Conexión con Redis establecida con éxito.")
-except redis.exceptions.RedisError as e:
-    print(f"❌ Error fatal al conectar con Redis: {e}")
-    exit(1)
-
+    redis_client = redis.Redis(host=REDIS_HOST, decode_responses=True, socket_connect_timeout=5); redis_client.ping(); print("✅ Conexión con Redis establecida con éxito.")
+except redis.exceptions.RedisError as e: print(f"❌ Error fatal al conectar con Redis: {e}"); exit(1)
 def send_telegram_notification(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
-    try:
-        requests.post(url, json=payload, timeout=10).raise_for_status()
-    except requests.exceptions.RequestException:
-        pass
-
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"; payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+    try: requests.post(url, json=payload, timeout=10).raise_for_status()
+    except requests.exceptions.RequestException: pass
 def run_docker_command(command):
     try:
-        full_command = f"{COMPOSE_CMD} -f {COMPOSE_FILE} -p {N8N_PROJECT_NAME} {command}"
-        result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
+        full_command = f"{COMPOSE_CMD} -p {N8N_PROJECT_NAME} {command}"; result = subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        print(f"❌ Error ejecutando: {full_command}\n   Error: {e.stderr.strip()}")
-        send_telegram_notification(f"‼️ *Error Crítico de Docker*\n_{e.stderr.strip()}_")
-        return None
-
+        print(f"❌ Error ejecutando: {full_command}\n   Error: {e.stderr.strip()}"); send_telegram_notification(f"‼️ *Error Crítico de Docker*\n_{e.stderr.strip()}_"); return None
 def get_running_workers():
-    output = run_docker_command(f"ps -q {N8N_WORKER_SERVICE_NAME}")
-    if output is None:
-        return -1
-    return len(output.splitlines()) if output else 0
-
+    output = run_docker_command(f"ps -q {N8N_WORKER_SERVICE_NAME}"); return -1 if output is None else len(output.splitlines()) if output else 0
 def scale_workers(desired_count):
     current_workers = get_running_workers()
-    if current_workers == -1 or current_workers == desired_count:
-        return
+    if current_workers == -1 or current_workers == desired_count: return
     print(f"⚖️  Escalando workers de {current_workers} a {desired_count}...")
     command = f"up -d --scale {N8N_WORKER_SERVICE_NAME}={desired_count} --no-recreate --remove-orphans"
-    if run_docker_command(command) is not None:
-        send_telegram_notification(f"✅ Auto-escalado. *Workers activos: {desired_count}*")
-    else:
-        send_telegram_notification(f"❌ *Error al escalar workers a {desired_count}*")
-
+    if run_docker_command(command) is not None: send_telegram_notification(f"✅ Auto-escalado. *Workers activos: {desired_count}*")
+    else: send_telegram_notification(f"❌ *Error al escalar workers a {desired_count}*")
 if __name__ == "__main__":
     send_telegram_notification(f"🤖 El servicio de auto-escalado para *{N8N_PROJECT_NAME}* ha sido iniciado.")
     idle_since = None
     while True:
         try:
-            queue_size = redis_client.llen(QUEUE_KEY)
-            running_workers = get_running_workers()
-            if running_workers == -1:
-                time.sleep(POLL_INTERVAL * 2)
-                continue
+            queue_size = redis_client.llen(QUEUE_KEY); running_workers = get_running_workers()
+            if running_workers == -1: time.sleep(POLL_INTERVAL * 2); continue
             print(f"Estado: Cola={queue_size}, Workers={running_workers}, Umbral={QUEUE_THRESHOLD}")
             if queue_size > QUEUE_THRESHOLD and running_workers < MAX_WORKERS:
-                scale_workers(min(running_workers + 1, MAX_WORKERS))
-                idle_since = None
+                scale_workers(min(running_workers + 1, MAX_WORKERS)); idle_since = None
             elif queue_size <= MIN_WORKERS and running_workers > MIN_WORKERS:
-                if idle_since is None:
-                    idle_since = time.time()
-                if time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN:
-                    scale_workers(max(running_workers - 1, MIN_WORKERS))
-                    idle_since = None
-            elif queue_size > MIN_WORKERS:
-                idle_since = None
+                if idle_since is None: idle_since = time.time()
+                if time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN: scale_workers(max(running_workers - 1, MIN_WORKERS)); idle_since = None
+            elif queue_size > MIN_WORKERS: idle_since = None
             time.sleep(POLL_INTERVAL)
-        except redis.exceptions.RedisError as e:
-            print(f"⚠️ Error de Redis: {e}. Reintentando...")
-            time.sleep(POLL_INTERVAL * 2)
-        except KeyboardInterrupt:
-            send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido.")
-            break
-        except Exception as e:
-            print(f"🔥 Error inesperado: {e}")
-            send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_")
-            time.sleep(POLL_INTERVAL * 3)
+        except redis.exceptions.RedisError as e: print(f"⚠️ Error de Redis: {e}. Reintentando..."); time.sleep(POLL_INTERVAL * 2)
+        except KeyboardInterrupt: send_telegram_notification(f"🤖 Servicio para *{N8N_PROJECT_NAME}* detenido."); break
+        except Exception as e: print(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 EOL
 
-echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."
-docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
-
-echo "🚀 Desplegando el servicio autoscaler en carpeta separada..."
-docker compose -f "$AUTOSCALER_DIR/docker-compose.yml" up -d --build
-
+echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
+echo "🚀 Desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
 if [ $? -eq 0 ]; then
-  print_header "¡Autoscaler Desplegado Correctamente!"
-  echo "Puedes ver los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
+    print_header "¡Instalación Completada!"; cd ..
+    echo "Tu stack ha sido configurado y el servicio de auto-escalado está en funcionamiento."; echo ""
+    echo "Pasos siguientes:"; echo "  1. Verifica con 'cat docker-compose.yml' que el archivo fue modificado."; echo "  2. Verifica los logs con: docker logs -f ${N8N_PROJECT_NAME}_autoscaler"
 else
-  echo "❌ Hubo un error al desplegar el autoscaler."
+    echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
 rm -f ./yq
 echo -e "\nGracias por usar este instalador. ¡Disfruta de tu servicio de auto-escalado para n8n! 🎉"
