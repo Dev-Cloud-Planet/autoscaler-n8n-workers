@@ -148,6 +148,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /n8n:/app
+    working_dir: /app
     networks:
       - n8n-network
 networks:
