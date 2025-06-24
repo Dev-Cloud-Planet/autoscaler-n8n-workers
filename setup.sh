@@ -169,6 +169,7 @@ services:
 networks:
   n8n_network:
     name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
+    driver: bridge
     external: true
 EOL
 
