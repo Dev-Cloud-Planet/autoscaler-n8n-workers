@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 4.2
+#   Versión: 4.3 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -14,24 +14,13 @@ print_header() {
 }
 
 ask() {
-    local prompt="$1"
-    local default="$2"
-    read -p "$prompt (def: $default): " reply < /dev/tty
-    echo "${reply:-$default}"
+    local prompt="$1"; local default="$2"; read -p "$prompt (def: $default): " reply < /dev/tty; echo "${reply:-$default}"
 }
 
 restore_and_exit() {
-    local step_name="$1"
-    echo -e "\n\033[1;31m❌ Error crítico: '$step_name'.\033[0m"
-    echo "🛡️  Restaurando 'docker-compose.yml' desde la copia de seguridad..."
-    if [ -f "$BACKUP_FILE" ]; then
-        mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"
-        echo "✅ Restauración completa. El script se detendrá."
-    else
-        echo "⚠️ No se encontró un archivo de backup para restaurar."
-    fi
-    rm -f yq
-    exit 1
+    local step_name="$1"; echo -e "\n\033[1;31m❌ Error crítico: '$step_name'.\033[0m"
+    echo "🛡️  Restaurando 'docker-compose.yml'..."; if [ -f "$BACKUP_FILE" ]; then mv "$BACKUP_FILE" "$N8N_COMPOSE_PATH"; echo "✅ Restauración completa."; else echo "⚠️ No se encontró backup."; fi
+    rm -f yq; exit 1
 }
 
 # --- Verificación de Dependencias ---
@@ -43,7 +32,7 @@ check_deps() {
 }
 
 # --- INICIO DEL SCRIPT ---
-clear; print_header "Instalador del Auto-Escalado para n8n v4.2"; check_deps
+clear; print_header "Instalador del Auto-Escalado para n8n v4.3"; check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
 print_header "1. Analizando tu Entorno n8n"
@@ -90,8 +79,7 @@ TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
 mv .env.tmp .env
 
-echo "📄 Generando 'docker-compose.yml' para el autoscaler..."
-cat > docker-compose.yml << EOL
+echo "📄 Generando 'docker-compose.yml' para el autoscaler..."; cat > docker-compose.yml << EOL
 services:
   autoscaler:
     image: n8n-autoscaler-service:latest
@@ -111,20 +99,31 @@ networks:
     external: true
 EOL
 
+echo "📄 Generando 'Dockerfile' con la sintaxis correcta...";
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg apt-transport-https && \
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gnupg apt-transport-https && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
     chmod a+r /etc/apt/keyrings/docker.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
     $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
     apt-get update && apt-get install -y docker-ce-cli && rm -rf /var/lib/apt/lists/*
+
 RUN DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -oP '"tag_name": "\K(v[0-9]+\.[0-9]+\.[0-9]+)') && \
     curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
-WORKDIR /app; COPY requirements.txt .; RUN pip install --no-cache-dir -r requirements.txt; COPY autoscaler.py .; CMD ["python", "-u", "autoscaler.py"]
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY autoscaler.py .
+
+CMD ["python", "-u", "autoscaler.py"]
 EOL
+
 cat > requirements.txt << 'EOL'
 redis
 requests
@@ -173,7 +172,6 @@ def main_loop():
         except Exception as e: log(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 if __name__ == "__main__":
     load_dotenv(); REDIS_HOST = os.getenv('REDIS_HOST', 'redis'); N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME'); N8N_WORKER_SERVICE_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
-    # ESTA ES LA LÍNEA CORREGIDA: 'default' en lugar de 'n8n-executions'
     QUEUE_KEY = "bull:default:wait"; QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 15)); MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
     MIN_WORKERS = int(os.getenv('MIN_WORKERS', 1)); IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 90)); POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 10))
     TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN'); TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
