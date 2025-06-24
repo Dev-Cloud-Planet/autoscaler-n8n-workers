@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 5.0 (Lógica y sintaxis corregidas)
+#   Versión: 6.0 (FINAL - Usa comandos yq secuenciales y robustos)
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -48,7 +48,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v5.0"
+print_header "Instalador del Servicio de Auto-Escalado para n8n v6.0"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -67,7 +67,7 @@ N8N_PROJECT_NAME=$(ask "Nombre del proyecto Docker" "${N8N_PROJECT_NAME:-n8n-pro
 DETECTED_N8N_SERVICE=$($YQ_CMD eval 'keys | .[]' "$N8N_COMPOSE_PATH" | grep -m1 "n8n")
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${DETECTED_N8N_SERVICE:-n8n}")
 DETECTED_REDIS_SERVICE=$($YQ_CMD eval '(.services[] | select(.image | test("redis")) | key)' "$N8N_COMPOSE_PATH" | head -n 1 | xargs)
-REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DEFAULT_REDIS_HOST:-${DETECTED_REDIS_SERVICE:-redis}}")
+REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DEFAULT_REDIS_SERVICE:-redis}")
 DETECTED_NETWORK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$DETECTED_NETWORK" ]; then echo "❌ Error: No se pudo detectar la red de '$N8N_MAIN_SERVICE_NAME'." && restore_and_exit; fi
 echo "✅ Red de Docker detectada: '$DETECTED_NETWORK'"
@@ -93,21 +93,26 @@ if [ -z "$IS_QUEUE_MODE" ]; then
 
     echo "⚙️  Aplicando configuración de modo 'queue' y añadiendo servicio de worker..."
     
-    $YQ_CMD eval "
-        .services.\"$REDIS_HOST\".healthcheck.test = [\"CMD\", \"redis-cli\", \"ping\"] |
-        .services.\"$REDIS_HOST\".healthcheck.interval = \"10s\" |
-        .services.\"$REDIS_HOST\".healthcheck.timeout = \"5s\" |
-        .services.\"$REDIS_HOST\".healthcheck.retries = 5 |
-        .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\", \"OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true\"] |
-        .services.\"$N8N_MAIN_SERVICE_NAME\".depends_on.\"$REDIS_HOST\".condition = \"service_healthy\" |
-        .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
-        .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= . - [\"EXECUTIONS_PROCESS=main\"] |
-        .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [\"EXECUTIONS_PROCESS=worker\"] |
-        del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
-        del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
-        del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)
-    " -i "$N8N_COMPOSE_PATH"
+    # --- Modificaciones con yq (método secuencial y robusto) ---
     
+    # Paso 1: Añadir healthcheck a Redis para asegurar que esté listo antes que n8n.
+    $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.test = ["CMD", "redis-cli", "ping"]' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.interval = "10s"' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
+
+    # Paso 2: Configurar el servicio principal de n8n.
+    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=main", "QUEUE_BULL_REDIS_HOST='$REDIS_HOST'", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true"]' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
+
+    # Paso 3: Crear y configurar el servicio de worker.
+    $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".environment |= . - ["EXECUTIONS_PROCESS=main"]' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".environment += ["EXECUTIONS_PROCESS=worker"]' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".ports)' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".container_name)' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".labels)' "$N8N_COMPOSE_PATH"
+
     if [ $? -ne 0 ]; then
         echo "❌ Error al modificar 'docker-compose.yml' con yq."
         restore_and_exit
