@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 2.2
+#   Versión: 2.3 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -65,7 +65,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v2.2"
+print_header "Instalador del Servicio de Auto-Escalado para n8n v2.3"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -131,7 +131,7 @@ if [ -z "$IS_QUEUE_MODE" ]; then
             \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
         ] |
         .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
-        .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= del(.[_n==\"EXECUTIONS_PROCESS=main\"]) |
+        .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= (. - [\"EXECUTIONS_PROCESS=main\"]) |
         .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [\"EXECUTIONS_PROCESS=worker\"] |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
@@ -190,7 +190,6 @@ EOL
 
 echo "📄 Generando 'docker-compose.yml' para el autoscaler..."
 cat > docker-compose.yml << EOL
-version: '3.8'
 services:
   autoscaler:
     image: n8n-autoscaler-service:latest
