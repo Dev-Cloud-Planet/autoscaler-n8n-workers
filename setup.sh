@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 2.3 (Corrige error de sintaxis yq con lógica de reemplazo más simple)
+#   Versión: 2.4 (FINAL - Elimina comentarios de yq y usa lógica simple)
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -65,7 +65,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v2.3"
+print_header "Instalador del Servicio de Auto-Escalado para n8n"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -122,21 +122,16 @@ if [ -z "$IS_QUEUE_MODE" ]; then
 
     echo "⚙️  Aplicando configuración de modo 'queue' y añadiendo servicio de worker..."
     
-    ### CORRECCIÓN PRINCIPAL AQUÍ (Lógica de yq simplificada) ###
+    ### CORRECCIÓN FINAL Y DEFINITIVA (Sin comentarios en yq eval) ###
     $YQ_CMD eval "
-        # 1. Añadir variables al servicio principal
         .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [
             \"EXECUTIONS_MODE=queue\",
             \"EXECUTIONS_PROCESS=main\",
             \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
         ] |
-        # 2. Copiar el servicio principal para crear el worker
         .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
-        # 3. Eliminar la variable 'main' del worker
         .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= del(select(. == \"EXECUTIONS_PROCESS=main\")) |
-        # 4. Añadir la variable 'worker' al worker
         .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [\"EXECUTIONS_PROCESS=worker\"] |
-        # 5. Limpiar configuraciones innecesarias del worker
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)
@@ -155,7 +150,7 @@ else
     echo "✅ El modo 'queue' ya está configurado. No se realizarán cambios en 'docker-compose.yml'."
 fi
 
-# --- FASE 4: DESPLIEGUE DEL AUTOSCALER (sin cambios) ---
+# --- FASE 4: DESPLIEGUE DEL AUTOSCALER (sin cambios, ya que funcionaba) ---
 print_header "4. Desplegando el Servicio de Auto-Escalado"
 AUTOSCALER_DIR="n8n-autoscaler"
 mkdir -p "$AUTOSCALER_DIR"
@@ -282,7 +277,7 @@ if __name__ == "__main__":
     except redis.exceptions.RedisError as e: log(f"❌ Error fatal al conectar con Redis en {REDIS_HOST}: {e}"); exit(1)
     log(f"🚀 Iniciando servicio de auto-escalado para el proyecto '{N8N_PROJECT_NAME}'"); send_telegram_notification(f"🤖 El servicio de auto-escalado para *{N8N_PROJECT_NAME}* ha sido (re)iniciado."); main_loop()
 EOL
-### FIN DE LOS CAMBIOS ###
+# --- FIN DE LOS CAMBIOS ---
 echo "🧹 Limpiando cualquier instancia anterior del autoscaler..."
 docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
 echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."
@@ -293,7 +288,7 @@ if [ $? -eq 0 ]; then
     echo "Tu stack de n8n ha sido configurado para escalar y el servicio de auto-escalado está en funcionamiento."
     echo ""
     echo "Pasos siguientes recomendados:"; echo "  1. Revisa los logs del autoscaler para confirmar que todo funciona:"; echo -e "     \033[0;32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m"
-    echo "  2. Puedes encontrar toda la configuración del autoscaler en la carpeta:"; echo -e "     \03_0;32m./n8n-autoscaler/\033[0m"
+    echo "  2. Puedes encontrar toda la configuración del autoscaler en la carpeta:"; echo -e "     \033[0;32m./n8n-autoscaler/\033[0m"
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
