@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 2.1 
+#   Versión: 2.2
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -65,7 +65,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v2.1"
+print_header "Instalador del Servicio de Auto-Escalado para n8n v2.2"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -92,7 +92,6 @@ RAW_PROJECT_NAME=${DEFAULT_PROJECT_NAME:-$(basename "$(pwd)")}
 N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]//g')
 N8N_PROJECT_NAME=$(ask "Nombre del proyecto Docker" "${N8N_PROJECT_NAME:-n8n-project}")
 
-## CORRECCIÓN 1: Método de detección del servicio n8n más robusto.
 DETECTED_N8N_SERVICE=$($YQ_CMD eval 'keys | .[]' "$N8N_COMPOSE_PATH" | grep -m1 "n8n")
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${DETECTED_N8N_SERVICE:-n8n}")
 
@@ -125,8 +124,6 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
 
     echo "⚙️  Aplicando configuración de modo 'queue' y añadiendo servicio de worker..."
-    
-    ## CORRECCIÓN 2: Se eliminan los comentarios dentro de yq eval para evitar errores de sintaxis.
     $YQ_CMD eval "
         .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [
             \"EXECUTIONS_MODE=queue\",
@@ -134,15 +131,13 @@ if [ -z "$IS_QUEUE_MODE" ]; then
             \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\"
         ] |
         .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
-        .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(
-            if . == \"EXECUTIONS_PROCESS=main\" then \"EXECUTIONS_PROCESS=worker\" else . end
-        ) |
+        .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= del(.[_n==\"EXECUTIONS_PROCESS=main\"]) |
+        .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [\"EXECUTIONS_PROCESS=worker\"] |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)
     " -i "$N8N_COMPOSE_PATH"
 
-    ## CORRECCIÓN 3: Verificar si el comando anterior falló.
     if [ $? -ne 0 ]; then
         echo "❌ Error al modificar 'docker-compose.yml' con yq. Revisa los mensajes de error anteriores."
         restore_and_exit
