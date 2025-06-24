@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 4.4 (Mejora de logs, detección de .env y reconstrucción forzada)
+#   Versión: 4.5 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -32,16 +32,12 @@ check_deps() {
 }
 
 # --- INICIO DEL SCRIPT ---
-clear; print_header "Instalador del Auto-Escalado para n8n v4.4"; check_deps
+clear; print_header "Instalador del Auto-Escalado para n8n"; check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
 print_header "1. Analizando tu Entorno n8n"
 N8N_COMPOSE_PATH="$(pwd)/docker-compose.yml"; if [ ! -f "$N8N_COMPOSE_PATH" ]; then echo "❌ Error: No se encontró 'docker-compose.yml'." >&2; rm -f yq; exit 1; fi
 N8N_ENV_PATH="$(pwd)/.env"
-
-# ====================================================
-#   MEJORA EN LA DETECCIÓN DE .ENV
-# ====================================================
 if [ -f "$N8N_ENV_PATH" ]; then
     echo "✅ Archivo '.env' detectado."
     DEFAULT_REDIS_HOST=$(grep -E "^REDIS_HOST=" "$N8N_ENV_PATH" | cut -d '=' -f2 | tr -d '"' | tr -d "'")
@@ -51,14 +47,12 @@ if [ -f "$N8N_ENV_PATH" ]; then
 else
     echo "⚠️  No se encontró el archivo '.env' en este directorio."
 fi
-
 RAW_PROJECT_NAME=${DEFAULT_PROJECT_NAME:-$(basename "$(pwd)")}; N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]//g'); N8N_PROJECT_NAME=$(ask "Nombre del proyecto Docker" "${N8N_PROJECT_NAME:-n8n-project}")
 DETECTED_N8N_SERVICE=$($YQ_CMD eval 'keys | .[]' "$N8N_COMPOSE_PATH" | grep -m1 "n8n"); N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${DETECTED_N8N_SERVICE:-n8n}")
 DETECTED_NETWORK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH"); if [ -z "$DETECTED_NETWORK" ] || [ "$DETECTED_NETWORK" == "null" ]; then echo "❌ Error: No se pudo detectar la red." >&2 && restore_and_exit "Detección de Red"; fi
 echo "✅ Red de Docker detectada: '$DETECTED_NETWORK'"; DETECTED_REDIS_SERVICE=$($YQ_CMD eval '(.services[] | select(.image | test("redis")) | key)' "$N8N_COMPOSE_PATH" | head -n 1 | xargs); REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DEFAULT_REDIS_HOST:-${DETECTED_REDIS_SERVICE:-redis}}")
 
 # --- FASE 2: CONFIGURACIÓN DEL MODO 'QUEUE' ---
-# (Esta parte es estable y no necesita cambios)
 print_header "2. Verificando y Configurando el Modo de Escalado"
 N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"; IS_QUEUE_MODE=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")" "$N8N_COMPOSE_PATH"); WORKER_EXISTS=$($YQ_CMD eval "has(\"services.$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH")
 if [ -z "$IS_QUEUE_MODE" ] || [ "$WORKER_EXISTS" == "false" ]; then
@@ -66,7 +60,7 @@ if [ -z "$IS_QUEUE_MODE" ] || [ "$WORKER_EXISTS" == "false" ]; then
     if [[ ! "$confirm_modify" =~ ^[yY](es)?$ ]]; then echo "Instalación cancelada."; rm -f yq; exit 1; fi
     BACKUP_FILE="${N8N_COMPOSE_PATH}.backup.$(date +%F_%T)"; echo "🛡️  Creando copia de seguridad en '$BACKUP_FILE'..."; cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"; echo "⚙️  Aplicando configuración moderna de escalado (paso a paso)..."
     echo "   Paso 1/4: Eliminando variables obsoletas..."; $YQ_CMD eval -i 'del(.services.[].environment[] | select(. == "EXECUTIONS_PROCESS=main" or . == "EXECUTIONS_PROCESS=worker"))' "$N8N_COMPOSE_PATH" || restore_and_exit "Paso 1"
-    echo "   Paso 2/4: Añadiendo variables modernas..."; CLEAN_REDIS_HOST=$(echo "$REDIS_HOST" | xargs); $YQ_CMD eval -i ".services.\"$N8N_MAIN_SERVICE_NAME\".environment |= (. - [\"EXECUTIONS_MODE=queue\", \"QUEUE_BULL_REDIS_HOST=*\"]) | .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"QUEUE_BULL_REDIS_HOST=$CLEAN_REDIS_HOST\", \"OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true\"]" "$N8N_COMPOSE_PATH" || restore_and_exit "Paso 2"
+    echo "   Paso 2/4: Añadiendo variables modernas..."; CLEAN_REDIS_HOST=$(echo "$REDIS_HOST" | xargs); $YQ_CMD eval -i ".services.\"$N8N_MAIN_SERVICE_NAME\".environment |= (. - [\"EXECUTIONS_MODE=queue\"] | . - [\"QUEUE_BULL_REDIS_HOST=*\"]) | .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"QUEUE_BULL_REDIS_HOST=$CLEAN_REDIS_HOST\", \"OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true\"]" "$N8N_COMPOSE_PATH" || restore_and_exit "Paso 2"
     echo "   Paso 3/4: Creando/Actualizando el servicio worker..."; $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH" || restore_and_exit "Paso 3"
     echo "   Paso 4/4: Limpiando claves innecesarias del worker..."; $YQ_CMD eval -i "del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) | del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) | del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)" "$N8N_COMPOSE_PATH" || restore_and_exit "Paso 4"
     echo "✅ Modificación de 'docker-compose.yml' completada."; print_header "3. Reiniciando Stack de n8n para Aplicar Cambios"
@@ -93,11 +87,27 @@ POLL_INTERVAL=${POLL_INTERVAL}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
+
 cat > docker-compose.yml << EOL
-version: '3.8'; services:
-  autoscaler: {build: ., container_name: ${N8N_PROJECT_NAME}_autoscaler, restart: always, env_file: .env, volumes: ['/var/run/docker.sock:/var/run/docker.sock', '${N8N_COMPOSE_PATH}:/app/docker-compose.yml'], working_dir: /app, networks: [n8n_network]}
-networks: {n8n_network: {name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}, external: true}}
+
+services:
+  autoscaler:
+    build: .
+    container_name: ${N8N_PROJECT_NAME}_autoscaler
+    restart: always
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${N8N_COMPOSE_PATH}:/app/docker-compose.yml
+    working_dir: /app
+    networks:
+      - n8n_network
+networks:
+  n8n_network:
+    name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
+    external: true
 EOL
+
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg apt-transport-https && \
@@ -110,17 +120,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 RUN DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -oP '"tag_name": "\K(v[0-9]+\.[0-9]+\.[0-9]+)') && \
     curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
     chmod +x /usr/local/bin/docker-compose
-WORKDIR /app; COPY requirements.txt .; RUN pip install --no-cache-dir -r requirements.txt; COPY autoscaler.py .; CMD ["python", "-u", "autoscaler.py"]
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY autoscaler.py .
+CMD ["python", "-u", "autoscaler.py"]
 EOL
 cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
-
-# ====================================================
-#   LOG DE DEPURACIÓN + CORRECCIÓN DE COLA
-# ====================================================
 cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
@@ -170,23 +180,15 @@ if __name__ == "__main__":
     try:
         redis_client = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True, socket_connect_timeout=5); redis_client.ping(); log("✅ Conexión con Redis establecida.")
     except redis.exceptions.RedisError as e: log(f"❌ Error fatal al conectar con Redis en {REDIS_HOST}: {e}"); exit(1)
-    log(f"🚀 Iniciando autoscaler para '{N8N_PROJECT_NAME}'...");
-    log(f"   -> VIGILANDO LA COLA DE REDIS: '{QUEUE_KEY}'");
+    log(f"🚀 Iniciando autoscaler para '{N8N_PROJECT_NAME}'..."); log(f"   -> VIGILANDO LA COLA DE REDIS: '{QUEUE_KEY}'");
     send_telegram_notification(f"🤖 Autoscaler para *{N8N_PROJECT_NAME}* (re)iniciado.")
     main_loop()
 EOL
 
-# ====================================================
-#   RECONSTRUCCIÓN FORZADA DEL AUTOSCALER
-# ====================================================
 echo "🧹 Limpiando instancia anterior del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
-echo "🏗️  Forzando la reconstrucción de la imagen del autoscaler (sin caché)...";
-$COMPOSE_CMD_HOST build --no-cache
-if [ $? -ne 0 ]; then
-    echo -e "\n❌ Hubo un error durante la construcción de la imagen del autoscaler. Revisa los logs de arriba."
-    cd ..; rm -f yq; exit 1
-fi
-echo "🚀 Desplegando el servicio de auto-escalado...";
+echo "🏗️  Construyendo y desplegando el servicio de auto-escalado...";
+$COMPOSE_CMD_HOST build
+if [ $? -ne 0 ]; then echo -e "\n❌ Hubo un error durante la construcción de la imagen del autoscaler."; cd ..; rm -f yq; exit 1; fi
 $COMPOSE_CMD_HOST up -d
 if [ $? -eq 0 ]; then
     print_header "🎉 ¡Instalación Completada con Éxito! 🎉"
