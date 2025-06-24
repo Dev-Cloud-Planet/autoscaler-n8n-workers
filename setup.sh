@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 4.5 
+#   Versión: 4.6 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -32,7 +32,7 @@ check_deps() {
 }
 
 # --- INICIO DEL SCRIPT ---
-clear; print_header "Instalador del Auto-Escalado para n8n"; check_deps
+clear; print_header "Instalador del Auto-Escalado para n8n v4.6"; check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
 print_header "1. Analizando tu Entorno n8n"
@@ -101,15 +101,12 @@ services:
       - ${N8N_COMPOSE_PATH}:/app/docker-compose.yml
     working_dir: /app
     networks:
-      - n8n-network
+      - n8n_network
 networks:
-  n8n-network:
-    driver: bridge
+  n8n_network:
+    name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
     external: true
-    name: ${DETECTED_NETWORK:-n8n-network}
-    
 EOL
-
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg apt-transport-https && \
@@ -162,7 +159,7 @@ def main_loop():
             queue_size = redis_client.llen(QUEUE_KEY); running_workers = get_running_workers()
             if running_workers == -1: time.sleep(POLL_INTERVAL * 2); continue
             log(f"Estado: Cola={queue_size}, Workers={running_workers}, Min={MIN_WORKERS}, Max={MAX_WORKERS}, Umbral={QUEUE_THRESHOLD}")
-            if queue_size > QUEUE_THRESHOLD and running_workers < MAX_WORKERS:
+            if queue_size >= QUEUE_THRESHOLD and running_workers < MAX_WORKERS:
                 scale_workers(min(running_workers + 1, MAX_WORKERS)); idle_since = None
             elif queue_size == 0 and running_workers > MIN_WORKERS:
                 if idle_since is None: idle_since = time.time(); log(f"Cola vacía. Iniciando temporizador de {IDLE_TIME_BEFORE_SCALE_DOWN}s para scale-down.")
@@ -175,7 +172,9 @@ def main_loop():
         except Exception as e: log(f"🔥 Error inesperado: {e}"); send_telegram_notification(f"🔥 *Error en Autoscaler {N8N_PROJECT_NAME}*\n_{str(e)}_"); time.sleep(POLL_INTERVAL * 3)
 if __name__ == "__main__":
     load_dotenv(); REDIS_HOST = os.getenv('REDIS_HOST', 'redis'); N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME'); N8N_WORKER_SERVICE_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
-    QUEUE_KEY = "bull:default:wait"; QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 15)); MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
+    # ESTA ES LA CORRECCIÓN FINAL BASADA EN TUS LOGS
+    QUEUE_KEY = "bull:jobs:wait"
+    QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 15)); MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
     MIN_WORKERS = int(os.getenv('MIN_WORKERS', 1)); IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 90)); POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 10))
     TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN'); TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
     if not all([N8N_PROJECT_NAME, N8N_WORKER_SERVICE_NAME]): log("❌ Error: Faltan variables de entorno críticas."); exit(1)
@@ -195,7 +194,7 @@ $COMPOSE_CMD_HOST up -d
 if [ $? -eq 0 ]; then
     print_header "🎉 ¡Instalación Completada con Éxito! 🎉"
     cd ..; echo "El stack de n8n está configurado y el autoscaler está funcionando con la lógica correcta."; echo ""
-    echo -e "Pasos siguientes:\n  1. Lanza algunas ejecuciones en n8n.\n  2. Revisa los logs: \033[0;32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m"
+    echo -e "Pasos siguientes:\n  1. Lanza algunas ejecuciones en n8n.\n  2. Revisa los logs: \03- [32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m"
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
