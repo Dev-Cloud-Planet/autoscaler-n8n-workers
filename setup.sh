@@ -103,9 +103,8 @@ services:
     networks:
       - n8n_network
 networks:
-  n8n_network:
-    name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
-    external: true
+  n8n-network:
+    driver: bridge
 EOL
 
 cat > Dockerfile << 'EOL'
