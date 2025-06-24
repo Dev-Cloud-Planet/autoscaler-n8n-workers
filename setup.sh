@@ -153,7 +153,6 @@ mv .env.tmp .env
 
 echo "📄 Generando 'docker-compose.yml' para el autoscaler..."
 cat > docker-compose.yml << EOL
-version: '3.8'
 services:
   autoscaler:
     image: n8n-autoscaler-service:latest
