@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 6.0 (FINAL - Usa comandos yq secuenciales y robustos)
+#   Versión: 7.0 (FINAL - Sin minificación, formato de archivos corregido)
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -48,7 +48,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v6.0"
+print_header "Instalador del Servicio de Auto-Escalado para n8n v7.0"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -67,7 +67,7 @@ N8N_PROJECT_NAME=$(ask "Nombre del proyecto Docker" "${N8N_PROJECT_NAME:-n8n-pro
 DETECTED_N8N_SERVICE=$($YQ_CMD eval 'keys | .[]' "$N8N_COMPOSE_PATH" | grep -m1 "n8n")
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${DETECTED_N8N_SERVICE:-n8n}")
 DETECTED_REDIS_SERVICE=$($YQ_CMD eval '(.services[] | select(.image | test("redis")) | key)' "$N8N_COMPOSE_PATH" | head -n 1 | xargs)
-REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DEFAULT_REDIS_SERVICE:-redis}")
+REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DETECTED_REDIS_SERVICE:-redis}")
 DETECTED_NETWORK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$DETECTED_NETWORK" ]; then echo "❌ Error: No se pudo detectar la red de '$N8N_MAIN_SERVICE_NAME'." && restore_and_exit; fi
 echo "✅ Red de Docker detectada: '$DETECTED_NETWORK'"
@@ -94,18 +94,12 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     echo "⚙️  Aplicando configuración de modo 'queue' y añadiendo servicio de worker..."
     
     # --- Modificaciones con yq (método secuencial y robusto) ---
-    
-    # Paso 1: Añadir healthcheck a Redis para asegurar que esté listo antes que n8n.
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.test = ["CMD", "redis-cli", "ping"]' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.interval = "10s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
-
-    # Paso 2: Configurar el servicio principal de n8n.
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=main", "QUEUE_BULL_REDIS_HOST='$REDIS_HOST'", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true"]' "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
-
-    # Paso 3: Crear y configurar el servicio de worker.
+    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_name'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".environment |= . - ["EXECUTIONS_PROCESS=main"]' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".environment += ["EXECUTIONS_PROCESS=worker"]' "$N8N_COMPOSE_PATH"
@@ -113,10 +107,7 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".container_name)' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".labels)' "$N8N_COMPOSE_PATH"
 
-    if [ $? -ne 0 ]; then
-        echo "❌ Error al modificar 'docker-compose.yml' con yq."
-        restore_and_exit
-    fi
+    if [ $? -ne 0 ]; then echo "❌ Error al modificar 'docker-compose.yml' con yq." && restore_and_exit; fi
 
     print_header "3. Reiniciando Stack de n8n para Aplicar Cambios"
     echo "🔄 Deteniendo y levantando los servicios con la nueva configuración..."
@@ -144,71 +135,168 @@ TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
 echo "📄 Generando archivos para el autoscaler..."
+
+# Docker Compose para el autoscaler, formato estándar
 cat > docker-compose.yml << EOL
 services:
-  autoscaler: {image: n8n-autoscaler-service:latest, build: '.', container_name: ${N8N_PROJECT_NAME}_autoscaler, restart: always, env_file: .env, volumes: ['/var/run/docker.sock:/var/run/docker.sock', '${N8N_COMPOSE_PATH}:/app/docker-compose.yml'], working_dir: /app, networks: [n8n_network]}
+  autoscaler:
+    image: n8n-autoscaler-service:latest
+    build: .
+    container_name: ${N8N_PROJECT_NAME}_autoscaler
+    restart: always
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${N8N_COMPOSE_PATH}:/app/docker-compose.yml
+    working_dir: /app
+    networks:
+      - n8n_network
+
 networks:
-  n8n_network: {name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}, external: true}
+  n8n_network:
+    name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
+    external: true
 EOL
+
+# Dockerfile con formato correcto, línea por línea
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg apt-transport-https redis-tools && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && apt-get update && apt-get install -y docker-ce-cli && rm -rf /var/lib/apt/lists/*
-RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose
-WORKDIR /app; COPY requirements.txt .; RUN pip install --no-cache-dir -r requirements.txt; COPY autoscaler.py .; CMD ["python", "-u", "autoscaler.py"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl ca-certificates gnupg apt-transport-https redis-tools && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y docker-ce-cli && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY autoscaler.py .
+CMD ["python", "-u", "autoscaler.py"]
 EOL
+
 cat > requirements.txt << 'EOL'
 redis
 requests
 python-dotenv
 EOL
+
+# Script de Python con formato estándar y legible
 cat > autoscaler.py << 'EOL'
-import os,time,subprocess,redis,requests
+import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
-def log(m):print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {m}",flush=True)
-def notify(m):
-    if not T_TOKEN or not T_CHAT_ID:return
-    try:requests.post(f"https://api.telegram.org/bot{T_TOKEN}/sendMessage",json={'chat_id':T_CHAT_ID,'text':m,'parse_mode':'Markdown'},timeout=10).raise_for_status()
-    except:log("⚠️ Error enviando notificación a Telegram")
-def docker_cmd(cmd):
+
+def log(message):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+def notify(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
-        f_cmd=f"docker-compose -p {N8N_PROJ_NAME} -f /app/docker-compose.yml {cmd}";log(f"🚀 Ejecutando: {f_cmd}")
-        return subprocess.run(f_cmd,shell=True,check=True,capture_output=True,text=True).stdout.strip()
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}, timeout=10).raise_for_status()
+    except requests.exceptions.RequestException as e:
+        log(f"⚠️  Error al enviar notificación a Telegram: {e}")
+
+def docker_cmd(command):
+    try:
+        full_command = f"docker-compose -p {N8N_PROJECT_NAME} -f /app/docker-compose.yml {command}"
+        log(f"🚀 Ejecutando: {full_command}")
+        return subprocess.run(full_command, shell=True, check=True, capture_output=True, text=True).stdout.strip()
     except subprocess.CalledProcessError as e:
-        err=f"❌ Docker Error: {e.stderr.strip()}";log(err);notify(f"‼️ *Error Crítico de Docker*\n_{e.stderr.strip()}_");return None
+        error_message = f"❌ Docker Error: {e.stderr.strip()}"
+        log(error_message)
+        notify(f"‼️ *Error Crítico de Docker*\n_{e.stderr.strip()}_")
+        return None
+
 def get_workers():
-    out=docker_cmd(f"ps -q {N8N_WORKER_NAME}");return-1 if out is None else len(out.splitlines())if out else 0
+    output = docker_cmd(f"ps -q {N8N_WORKER_NAME}")
+    return -1 if output is None else len(output.splitlines()) if output else 0
+
 def scale(count):
-    curr=get_workers()
-    if curr==-1 or curr==count:return
-    log(f"⚖️ Escalando de {curr} a {count} workers...");cmd=f"up -d --scale {N8N_WORKER_NAME}={count} --no-recreate --remove-orphans"
-    if docker_cmd(cmd) is not None:log(f"✅ Escalado completo: {count} workers");notify(f"✅ *{N8N_PROJ_NAME}* | Workers: *{count}*")
-    else:log(f"❌ Error al escalar a {count}");notify(f"❌ Error al escalar a {count}")
-def loop():
-    idle=None
+    current_workers = get_workers()
+    if current_workers == -1 or current_workers == count: return
+    log(f"⚖️ Escalando de {current_workers} a {count} workers...")
+    command = f"up -d --scale {N8N_WORKER_NAME}={count} --no-recreate --remove-orphans"
+    if docker_cmd(command) is not None:
+        log(f"✅ Escalado completo. Workers activos: {count}")
+        notify(f"✅ *{N8N_PROJECT_NAME}* | Workers: *{count}*")
+    else:
+        log(f"❌ Error al escalar a {count}")
+        notify(f"❌ Error al escalar a {count}")
+
+def main_loop():
+    idle_since = None
     while True:
         try:
-            q=r.llen(Q_KEY);w=get_workers()
-            if w==-1:time.sleep(POLL*2);continue
-            log(f"Estado: Cola={q}, Workers={w}, Umbral={Q_THR}")
-            if q>Q_THR and w<MAX_W:scale(min(w+1,MAX_W));idle=None
-            elif q==0 and w>MIN_W:
-                if idle is None:idle=time.time();log(f"Cola vacía. Temporizador de {IDLE_S}s iniciado.")
-                if time.time()-idle>=IDLE_S:scale(max(w-1,MIN_W));idle=None
-            elif q>0:
-                if idle is not None:log("La cola ya no está vacía. Cancelando scale-down.");idle=None
-            time.sleep(POLL)
-        except redis.exceptions.RedisError as e:log(f"⚠️ Redis Error: {e}. Reintentando...");time.sleep(POLL*2)
-        except KeyboardInterrupt:log("🛑 Script detenido.");notify(f"🤖 Autoscaler para *{N8N_PROJ_NAME}* detenido.");break
-        except Exception as e:log(f"🔥 Error inesperado: {e}");notify(f"🔥 *Error en Autoscaler*\n_{str(e)}_");time.sleep(POLL*3)
-if __name__=="__main__":
-    load_dotenv();N8N_PROJ_NAME=os.getenv('N8N_DOCKER_PROJECT_NAME');N8N_WORKER_NAME=os.getenv('N8N_WORKER_SERVICE_NAME')
-    REDIS_HOST=os.getenv('REDIS_HOST','redis');Q_KEY="bull:n8n-executions:wait";Q_THR=int(os.getenv('QUEUE_THRESHOLD',15));MAX_W=int(os.getenv('MAX_WORKERS',5));MIN_W=int(os.getenv('MIN_WORKERS',0))
-    IDLE_S=int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN',90));POLL=int(os.getenv('POLL_INTERVAL',10));T_TOKEN=os.getenv('TELEGRAM_BOT_TOKEN');T_CHAT_ID=os.getenv('TELEGRAM_CHAT_ID')
-    if not all([N8N_PROJ_NAME,N8N_WORKER_NAME]):log("❌ Faltan variables de entorno críticas.");exit(1)
-    try:r=redis.Redis(host=REDIS_HOST,port=6379,decode_responses=True,socket_connect_timeout=5);r.ping();log("✅ Conexión con Redis establecida.")
-    except redis.exceptions.RedisError as e:log(f"❌ Error fatal al conectar con Redis en {REDIS_HOST}: {e}");exit(1)
-    log(f"🚀 Iniciando autoscaler para '{N8N_PROJ_NAME}'");notify(f"🤖 Autoscaler para *{N8N_PROJ_NAME}* (re)iniciado.");loop()
+            queue_size = redis_client.llen(QUEUE_KEY)
+            running_workers = get_workers()
+            if running_workers == -1:
+                time.sleep(POLL_INTERVAL * 2)
+                continue
+            log(f"Estado: Cola={queue_size}, Workers={running_workers}, Umbral={QUEUE_THRESHOLD}")
+            if queue_size > QUEUE_THRESHOLD and running_workers < MAX_WORKERS:
+                scale(min(running_workers + 1, MAX_WORKERS))
+                idle_since = None
+            elif queue_size == 0 and running_workers > MIN_WORKERS:
+                if idle_since is None:
+                    idle_since = time.time()
+                    log(f"Cola vacía. Temporizador de {IDLE_TIME_BEFORE_SCALE_DOWN}s iniciado.")
+                if time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN:
+                    scale(max(running_workers - 1, MIN_WORKERS))
+                    idle_since = None
+            elif queue_size > 0:
+                if idle_since is not None:
+                    log("La cola ya no está vacía. Cancelando scale-down.")
+                    idle_since = None
+            time.sleep(POLL_INTERVAL)
+        except redis.exceptions.RedisError as e:
+            log(f"⚠️ Redis Error: {e}. Reintentando...")
+            time.sleep(POLL_INTERVAL * 2)
+        except KeyboardInterrupt:
+            log("🛑 Script detenido.")
+            notify(f"🤖 Autoscaler para *{N8N_PROJECT_NAME}* detenido.")
+            break
+        except Exception as e:
+            log(f"🔥 Error inesperado: {e}")
+            notify(f"🔥 *Error en Autoscaler*\n_{str(e)}_")
+            time.sleep(POLL_INTERVAL * 3)
+
+if __name__ == "__main__":
+    load_dotenv()
+    N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME')
+    N8N_WORKER_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
+    REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
+    QUEUE_KEY = "bull:n8n-executions:wait"
+    QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 15))
+    MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
+    MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0))
+    IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 90))
+    POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 10))
+    TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+    if not all([N8N_PROJECT_NAME, N8N_WORKER_NAME]):
+        log("❌ Faltan variables de entorno críticas.")
+        exit(1)
+    try:
+        redis_client = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True, socket_connect_timeout=5)
+        redis_client.ping()
+        log("✅ Conexión con Redis establecida.")
+    except redis.exceptions.RedisError as e:
+        log(f"❌ Error fatal al conectar con Redis en {REDIS_HOST}: {e}")
+        exit(1)
+    log(f"🚀 Iniciando autoscaler para '{N8N_PROJECT_NAME}'")
+    notify(f"🤖 Autoscaler para *{N8N_PROJECT_NAME}* (re)iniciado.")
+    main_loop()
 EOL
+
 # --- Despliegue Final ---
 echo "🧹 Limpiando instancias anteriores del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
 echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
