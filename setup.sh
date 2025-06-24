@@ -101,7 +101,7 @@ services:
       - ${N8N_COMPOSE_PATH}:/app/docker-compose.yml
     working_dir: /app
     networks:
-      - n8n_network
+      - n8n-network
 networks:
   n8n-network:
     driver: bridge
