@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 4.0 
+#   Versión: 5.0 (Lógica y sintaxis corregidas)
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -48,7 +48,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v4.0"
+print_header "Instalador del Servicio de Auto-Escalado para n8n v5.0"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -76,7 +76,6 @@ echo "✅ Red de Docker detectada: '$DETECTED_NETWORK'"
 # --- FASE 2: CONFIGURACIÓN DEL MODO 'QUEUE' ---
 print_header "2. Verificando y Configurando el Modo de Escalado"
 N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"
-
 IS_QUEUE_MODE=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")" "$N8N_COMPOSE_PATH" 2>/dev/null)
 
 if [ -z "$IS_QUEUE_MODE" ]; then
@@ -94,27 +93,16 @@ if [ -z "$IS_QUEUE_MODE" ]; then
 
     echo "⚙️  Aplicando configuración de modo 'queue' y añadiendo servicio de worker..."
     
-    ### CORRECCIÓN DE LÓGICA YQ Y DEPENDENCIAS ###
     $YQ_CMD eval "
-        # 1. Configurar el servicio principal de n8n
-        .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [
-            \"EXECUTIONS_MODE=queue\",
-            \"EXECUTIONS_PROCESS=main\",
-            \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\",
-            \"OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true\"
-        ] |
-        .services.\"$N8N_MAIN_SERVICE_NAME\".depends_on += [\"$REDIS_HOST\"] |
-
-        # 2. Crear el servicio de worker duplicando el principal
+        .services.\"$REDIS_HOST\".healthcheck.test = [\"CMD\", \"redis-cli\", \"ping\"] |
+        .services.\"$REDIS_HOST\".healthcheck.interval = \"10s\" |
+        .services.\"$REDIS_HOST\".healthcheck.timeout = \"5s\" |
+        .services.\"$REDIS_HOST\".healthcheck.retries = 5 |
+        .services.\"$N8N_MAIN_SERVICE_NAME\".environment += [\"EXECUTIONS_MODE=queue\", \"EXECUTIONS_PROCESS=main\", \"QUEUE_BULL_REDIS_HOST=$REDIS_HOST\", \"OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true\"] |
+        .services.\"$N8N_MAIN_SERVICE_NAME\".depends_on.\"$REDIS_HOST\".condition = \"service_healthy\" |
         .services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\" |
-        
-        # 3. Eliminar la variable 'main' del worker (forma robusta)
         .services.\"$N8N_WORKER_SERVICE_NAME\".environment |= . - [\"EXECUTIONS_PROCESS=main\"] |
-        
-        # 4. Añadir la variable 'worker' al worker
         .services.\"$N8N_WORKER_SERVICE_NAME\".environment += [\"EXECUTIONS_PROCESS=worker\"] |
-        
-        # 5. Limpiar configuraciones innecesarias del worker
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name) |
         del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)
@@ -159,7 +147,7 @@ networks:
 EOL
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg apt-transport-https && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && apt-get update && apt-get install -y docker-ce-cli && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg apt-transport-https redis-tools && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && apt-get update && apt-get install -y docker-ce-cli && rm -rf /var/lib/apt/lists/*
 RUN curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose
 WORKDIR /app; COPY requirements.txt .; RUN pip install --no-cache-dir -r requirements.txt; COPY autoscaler.py .; CMD ["python", "-u", "autoscaler.py"]
 EOL
@@ -221,7 +209,7 @@ echo "🧹 Limpiando instancias anteriores del autoscaler..."; docker rm -f "${N
 echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
 if [ $? -eq 0 ]; then
     print_header "🎉 ¡Instalación Completada con Éxito! 🎉"
-    cd ..; echo -e "Tu stack de n8n ha sido configurado y el autoscaler está funcionando.\n\nPasos siguientes:\n  1. Revisa los logs: \033[0;32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m\n  2. Revisa los logs de n8n: \033[0;32mdocker logs ${N8N_PROJECT_NAME}_n8n_1\033[0m\n  3. Configuración en: \033[0;32m./n8n-autoscaler/\033[0m"
+    cd ..; echo -e "Tu stack de n8n ha sido configurado y el autoscaler está funcionando.\n\nPasos siguientes:\n  1. Revisa los logs: \033[0;32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m\n  2. Configuración en: \033[0;32m./n8n-autoscaler/\033[0m"
 else
     echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
 fi
