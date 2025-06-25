@@ -3,7 +3,7 @@ set -u
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 7.1 
+#   Versión: 7.1
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -39,11 +39,18 @@ check_deps() {
     for cmd in docker curl wget sed grep cut xargs; do
         if ! command -v $cmd &> /dev/null; then echo "❌ Error: El comando '$cmd' es esencial." && exit 1; fi
     done
-    if docker compose version &>/dev/null; then COMPOSE_CMD_HOST="docker compose"; elif docker-compose version &>/dev/null; then COMPOSE_CMD_HOST="docker-compose"; else echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'." && exit 1; fi
+    if docker compose version &>/dev/null; then COMPOSE_CMD_HOST="docker compose"
+    elif docker-compose version &>/dev/null; then COMPOSE_CMD_HOST="docker-compose"
+    else echo "❌ Error: No se encontró 'docker-compose' o el plugin 'docker compose'." && exit 1; fi
     echo "✅ Se usará '$COMPOSE_CMD_HOST' para las operaciones del host."
     if [ ! -f ./yq ]; then
-        echo "📥 Descargando la herramienta 'yq'..."; YQ_VERSION="v4.30.8"; YQ_BINARY="yq_linux_amd64"; wget -q "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" -O ./yq && chmod +x ./yq || { echo "❌ Falló la descarga de yq." && exit 1; }; fi
-    YQ_CMD="./yq"; echo "✅ Dependencias listas."
+        echo "📥 Descargando la herramienta 'yq'..."
+        YQ_VERSION="v4.30.8"
+        YQ_BINARY="yq_linux_amd64"
+        wget -q "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" -O ./yq && chmod +x ./yq || { echo "❌ Falló la descarga de yq." && exit 1; }
+    fi
+    YQ_CMD="./yq"
+    echo "✅ Dependencias listas."
 }
 
 # --- INICIO DEL SCRIPT ---
@@ -55,34 +62,47 @@ check_deps
 print_header "1. Analizando tu Entorno n8n"
 N8N_COMPOSE_PATH="$(pwd)/docker-compose.yml"
 if [ ! -f "$N8N_COMPOSE_PATH" ]; then echo "❌ Error: No se encontró 'docker-compose.yml' en el directorio actual." && rm -f yq && exit 1; fi
+
 N8N_ENV_PATH="$(pwd)/.env"
 if [ -f "$N8N_ENV_PATH" ]; then
     echo "✅ Archivo de entorno '.env' detectado."
     DEFAULT_REDIS_HOST=$(grep -E "^REDIS_HOST=" "$N8N_ENV_PATH" | cut -d '=' -f2 | tr -d '"' | tr -d "'")
     DEFAULT_PROJECT_NAME=$(grep -E "^COMPOSE_PROJECT_NAME=" "$N8N_ENV_PATH" | cut -d '=' -f2 | tr -d '"' | tr -d "'")
-
-    # Validar si está la variable DB_HOST (para evitar problemas con la DB)
-    if ! grep -qE "^DB_HOST=" "$N8N_ENV_PATH"; then
-        echo -e "\033[1;33m⚠️ Advertencia: No se detectó variable DB_HOST en .env, puede fallar la conexión a la base de datos.\033[0m"
-    fi
-else
-    echo "⚠️ No se detectó archivo '.env'. Asegúrate de que las variables de entorno estén bien configuradas."
 fi
 
 RAW_PROJECT_NAME=${DEFAULT_PROJECT_NAME:-$(basename "$(pwd)")}
 N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]//g')
 N8N_PROJECT_NAME=$(ask "Nombre del proyecto Docker" "${N8N_PROJECT_NAME:-n8n-project}")
+
 DETECTED_N8N_SERVICE=$($YQ_CMD eval 'keys | .[]' "$N8N_COMPOSE_PATH" | grep -m1 "n8n")
 N8N_MAIN_SERVICE_NAME=$(ask "Nombre de tu servicio principal de n8n" "${DETECTED_N8N_SERVICE:-n8n}")
+
 DETECTED_REDIS_SERVICE=$($YQ_CMD eval '(.services[] | select(.image | test("redis")) | key)' "$N8N_COMPOSE_PATH" | head -n 1 | xargs)
 REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DETECTED_REDIS_SERVICE:-redis}")
+
 DETECTED_NETWORK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$DETECTED_NETWORK" ]; then echo "❌ Error: No se pudo detectar la red de '$N8N_MAIN_SERVICE_NAME'." && restore_and_exit; fi
 echo "✅ Red de Docker detectada: '$DETECTED_NETWORK'"
 
+N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"
+
+# --- Detectar env_file del servicio principal ---
+ENV_FILE_PATH=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".env_file" "$N8N_COMPOSE_PATH" 2>/dev/null | tr -d '"')
+
+if [ -z "$ENV_FILE_PATH" ]; then
+  ENV_FILE_PATH=".env"
+fi
+
+# Verificar si DB_HOST está en el archivo env_file
+if ! grep -qE "^DB_HOST=" "$ENV_FILE_PATH" 2>/dev/null; then
+  echo "⚠️ No se encontró 'DB_HOST' en $ENV_FILE_PATH."
+  read -p "Por favor, ingresa el valor para DB_HOST: " input_db_host
+  echo "DB_HOST=$input_db_host" >> "$ENV_FILE_PATH"
+  echo "✅ DB_HOST añadido a $ENV_FILE_PATH."
+fi
+
 # --- FASE 2: CONFIGURACIÓN DEL MODO 'QUEUE' ---
 print_header "2. Verificando y Configurando el Modo de Escalado"
-N8N_WORKER_SERVICE_NAME="${N8N_MAIN_SERVICE_NAME}-worker"
 IS_QUEUE_MODE=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".environment[] | select(. == \"EXECUTIONS_MODE=queue\")" "$N8N_COMPOSE_PATH" 2>/dev/null)
 
 if [ -z "$IS_QUEUE_MODE" ]; then
@@ -105,19 +125,17 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.interval = "10s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += ["EXECUTIONS_MODE=queue", "QUEUE_BULL_REDIS_HOST='$REDIS_HOST'", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true"]' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += ["EXECUTIONS_MODE=queue", "QUEUE_BULL_REDIS_HOST=\"'$REDIS_HOST'\"", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true"]' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
 
-    # Copiar servicio principal al worker
+    # Añadir worker con configuración copiada y ajustes
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
-
-    # Hacer que el worker use el mismo env_file que el principal para heredar variables
-    $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".env_file = .services."'$N8N_MAIN_SERVICE_NAME'".env_file' "$N8N_COMPOSE_PATH"
-
-    # Limpiar configuraciones que no aplican para el worker
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".ports)' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".container_name)' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".labels)' "$N8N_COMPOSE_PATH"
+
+    # Asignar env_file como string en worker
+    $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".env_file = \"$ENV_FILE_PATH\"" "$N8N_COMPOSE_PATH"
 
     if [ $? -ne 0 ]; then echo "❌ Error al modificar 'docker-compose.yml' con yq." && restore_and_exit; fi
 
@@ -131,8 +149,17 @@ fi
 
 # --- FASE 4: DESPLIEGUE DEL AUTOSCALER ---
 print_header "4. Desplegando el Servicio de Auto-Escalado"
-AUTOSCALER_DIR="n8n-autoscaler"; mkdir -p "$AUTOSCALER_DIR"; if [ -f "$N8N_ENV_PATH" ]; then echo "📋 Copiando '$N8N_ENV_PATH' a '$AUTOSCALER_DIR/.env'..."; cp "$N8N_ENV_PATH" "$AUTOSCALER_DIR/.env"; else touch "$AUTOSCALER_DIR/.env"; fi
+AUTOSCALER_DIR="n8n-autoscaler"
+mkdir -p "$AUTOSCALER_DIR"
+if [ -f "$N8N_ENV_PATH" ]; then
+    echo "📋 Copiando '$N8N_ENV_PATH' a '$AUTOSCALER_DIR/.env'..."
+    cp "$N8N_ENV_PATH" "$AUTOSCALER_DIR/.env"
+else
+    touch "$AUTOSCALER_DIR/.env"
+fi
+
 cd "$AUTOSCALER_DIR" || exit
+
 echo -e "\nAhora, configuremos el comportamiento del auto-escalado:"
 QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un nuevo worker" "15")
 MAX_WORKERS=$(ask "Nº máximo de workers permitidos" "5")
@@ -141,6 +168,7 @@ IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un work
 POLL_INTERVAL=$(ask "Segundos entre cada verificación" "10")
 TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" "")
 TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
+
 cat >> .env << EOL
 
 # --- AUTOSCALER CONFIG - GENERATED BY SCRIPT ---
@@ -154,9 +182,10 @@ POLL_INTERVAL=${POLL_INTERVAL}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 EOL
+
 echo "📄 Generando archivos para el autoscaler..."
 
-# Docker Compose para el autoscaler, formato estándar
+# Docker Compose para el autoscaler
 cat > docker-compose.yml << EOL
 services:
   autoscaler:
@@ -177,8 +206,6 @@ networks:
     name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
     external: true
 EOL
-
-# Dockerfile con formato correcto, línea por línea
 cat > Dockerfile << 'EOL'
 FROM python:3.9-slim
 
