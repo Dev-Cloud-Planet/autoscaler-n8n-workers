@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 7.0 (FINAL - Sin minificación, formato de archivos corregido)
+#   Versión: 7.0
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -274,7 +274,7 @@ if __name__ == "__main__":
     N8N_PROJECT_NAME = os.getenv('N8N_DOCKER_PROJECT_NAME')
     N8N_WORKER_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
     REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
-    QUEUE_KEY = "bull:n8n-executions:wait"
+    QUEUE_KEY = "jobs:n8n-executions:wait"
     QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 15))
     MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
     MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0))
