@@ -93,12 +93,13 @@ if [ -z "$ENV_FILE_PATH" ]; then
   ENV_FILE_PATH=".env"
 fi
 
-# Verificar si DB_HOST está en el archivo env_file
+# Verificar si DB_HOST está en el archivo env_file, si no pedir y añadir con default 'postgres'
 if ! grep -qE "^DB_HOST=" "$ENV_FILE_PATH" 2>/dev/null; then
   echo "⚠️ No se encontró 'DB_HOST' en $ENV_FILE_PATH."
-  read -p "Por favor, ingresa el valor para DB_HOST: " input_db_host
+  read -p "Por favor, ingresa el valor para DB_HOST [default: postgres]: " input_db_host < /dev/tty
+  input_db_host="${input_db_host:-postgres}"
   echo "DB_HOST=$input_db_host" >> "$ENV_FILE_PATH"
-  echo "✅ DB_HOST añadido a $ENV_FILE_PATH."
+  echo "✅ DB_HOST añadido a $ENV_FILE_PATH con valor '$input_db_host'."
 fi
 
 # --- FASE 2: CONFIGURACIÓN DEL MODO 'QUEUE' ---
@@ -237,7 +238,6 @@ requests
 python-dotenv
 EOL
 
-# Script de Python con formato estándar y legible
 cat > autoscaler.py << 'EOL'
 import os, time, subprocess, redis, requests
 from dotenv import load_dotenv
@@ -325,39 +325,21 @@ if __name__ == "__main__":
     N8N_WORKER_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
     REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
     QUEUE_KEY = "bull:jobs:wait"
-    QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 0))  # ya no se usa pero lo dejamos
+    QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 0))  # Jobs para crear nuevo worker
     MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
     MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0))
     IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 90))
     POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 10))
     TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-    if not all([N8N_PROJECT_NAME, N8N_WORKER_NAME]):
-        log("❌ Faltan variables de entorno críticas.")
-        exit(1)
-    try:
-        redis_client = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True, socket_connect_timeout=5)
-        redis_client.ping()
-        log("✅ Conexión con Redis establecida.")
-    except redis.exceptions.RedisError as e:
-        log(f"❌ Error fatal al conectar con Redis en {REDIS_HOST}: {e}")
-        exit(1)
-    log(f"🚀 Iniciando autoscaler para '{N8N_PROJECT_NAME}'")
-    notify(f"🤖 Autoscaler para *{N8N_PROJECT_NAME}* (re)iniciado.")
+    redis_client = redis.Redis(host=REDIS_HOST, decode_responses=True)
     main_loop()
 EOL
 
-# --- Despliegue Final ---
-echo "🧹 Limpiando instancias anteriores del autoscaler..."
-docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
-echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."
-$COMPOSE_CMD_HOST up -d --build
-if [ $? -eq 0 ]; then
-    print_header "🎉 ¡Instalación Completada con Éxito! 🎉"
-    cd ..; echo -e "Tu stack de n8n ha sido configurado y el autoscaler está funcionando.\n\nPasos siguientes:\n  1. Revisa los logs: \033[0;32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m\n  2. Configuración en: \033[0;32m./n8n-autoscaler/\033[0m"
-else
-    echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."
-    cd ..
-fi
-rm -f ./yq
-echo -e "\nScript finalizado.\n"
+echo "✅ Configuración del autoscaler completada."
+echo "Para iniciar el autoscaler, ejecuta dentro de 'n8n-autoscaler':"
+echo "    docker compose up -d"
+
+rm -f ../yq
+
+print_header "¡Proceso finalizado!"
