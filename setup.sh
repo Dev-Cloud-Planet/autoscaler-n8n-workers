@@ -154,8 +154,8 @@ if [[ -z "$IS_QUEUE_MODE" ]]; then
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".container_name)' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".labels)' "$N8N_COMPOSE_PATH"
 
-    # Asignar env_file como string en worker
-    $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".env_file = \"$ENV_FILE_PATH\"" "$N8N_COMPOSE_PATH"
+    # Cambiado para poner env_file como lista, no string
+    $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".env_file = [\"$ENV_FILE_PATH\"]" "$N8N_COMPOSE_PATH"
 
     if [[ $? -ne 0 ]]; then
         echo "❌ Error al modificar 'docker-compose.yml' con yq."
@@ -179,6 +179,7 @@ if [[ -f "$N8N_ENV_PATH" ]]; then
     echo "📋 Copiando '$N8N_ENV_PATH' a '$AUTOSCALER_DIR/.env'..."
     cp "$N8N_ENV_PATH" "$AUTOSCALER_DIR/.env"
 else
+    echo "⚠️ No se encontró archivo .env principal, creando vacío en autoscaler..."
     touch "$AUTOSCALER_DIR/.env"
 fi
 
@@ -215,23 +216,24 @@ echo "📄 Generando archivos para el autoscaler..."
 
 # Docker Compose para el autoscaler
 cat > docker-compose.yml << EOL
+version: "3.8"
 services:
   autoscaler:
     image: n8n-autoscaler-service:latest
     build: .
     container_name: ${N8N_PROJECT_NAME}_autoscaler
     restart: always
-    env_file: .env
+    env_file:
+      - .env  # corregido: referencia local dentro del contenedor
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${N8N_COMPOSE_PATH}:/app/docker-compose.yml
+      - ${N8N_COMPOSE_PATH}:/app/docker-compose.yml:ro
     working_dir: /app
     networks:
-      - n8n_network
+      - ${DETECTED_NETWORK}
 
 networks:
-  n8n_network:
-    name: ${N8N_PROJECT_NAME}_${DETECTED_NETWORK}
+  ${DETECTED_NETWORK}:
     external: true
 EOL
 cat > Dockerfile << 'EOL'
