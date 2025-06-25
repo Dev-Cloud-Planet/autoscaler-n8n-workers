@@ -3,7 +3,7 @@ set -u
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
-#   Versión: 7.0
+#   Versión: 7.1 
 # ==============================================================================
 
 # --- Funciones Auxiliares ---
@@ -48,7 +48,7 @@ check_deps() {
 
 # --- INICIO DEL SCRIPT ---
 clear
-print_header "Instalador del Servicio de Auto-Escalado para n8n v7.0"
+print_header "Instalador del Servicio de Auto-Escalado para n8n v7.1"
 check_deps
 
 # --- FASE 1: ANÁLISIS DEL ENTORNO ---
@@ -60,7 +60,15 @@ if [ -f "$N8N_ENV_PATH" ]; then
     echo "✅ Archivo de entorno '.env' detectado."
     DEFAULT_REDIS_HOST=$(grep -E "^REDIS_HOST=" "$N8N_ENV_PATH" | cut -d '=' -f2 | tr -d '"' | tr -d "'")
     DEFAULT_PROJECT_NAME=$(grep -E "^COMPOSE_PROJECT_NAME=" "$N8N_ENV_PATH" | cut -d '=' -f2 | tr -d '"' | tr -d "'")
+
+    # Validar si está la variable DB_HOST (para evitar problemas con la DB)
+    if ! grep -qE "^DB_HOST=" "$N8N_ENV_PATH"; then
+        echo -e "\033[1;33m⚠️ Advertencia: No se detectó variable DB_HOST en .env, puede fallar la conexión a la base de datos.\033[0m"
+    fi
+else
+    echo "⚠️ No se detectó archivo '.env'. Asegúrate de que las variables de entorno estén bien configuradas."
 fi
+
 RAW_PROJECT_NAME=${DEFAULT_PROJECT_NAME:-$(basename "$(pwd)")}
 N8N_PROJECT_NAME=$(echo "$RAW_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]//g')
 N8N_PROJECT_NAME=$(ask "Nombre del proyecto Docker" "${N8N_PROJECT_NAME:-n8n-project}")
@@ -71,7 +79,6 @@ REDIS_HOST=$(ask "Hostname de tu servicio Redis" "${DETECTED_REDIS_SERVICE:-redi
 DETECTED_NETWORK=$($YQ_CMD eval ".services.\"$N8N_MAIN_SERVICE_NAME\".networks[0]" "$N8N_COMPOSE_PATH")
 if [ -z "$DETECTED_NETWORK" ]; then echo "❌ Error: No se pudo detectar la red de '$N8N_MAIN_SERVICE_NAME'." && restore_and_exit; fi
 echo "✅ Red de Docker detectada: '$DETECTED_NETWORK'"
-
 
 # --- FASE 2: CONFIGURACIÓN DEL MODO 'QUEUE' ---
 print_header "2. Verificando y Configurando el Modo de Escalado"
@@ -92,15 +99,22 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     cp "$N8N_COMPOSE_PATH" "$BACKUP_FILE"
 
     echo "⚙️  Aplicando configuración de modo 'queue' y añadiendo servicio de worker..."
-    
-    # --- Modificaciones con yq (método secuencial y robusto) ---
+
+    # --- Modificaciones con yq ---
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.test = ["CMD", "redis-cli", "ping"]' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.interval = "10s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += ["EXECUTIONS_MODE=queue", "QUEUE_BULL_REDIS_HOST='$REDIS_HOST'", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true"]' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
+
+    # Copiar servicio principal al worker
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
+
+    # Hacer que el worker use el mismo env_file que el principal para heredar variables
+    $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".env_file = .services."'$N8N_MAIN_SERVICE_NAME'".env_file' "$N8N_COMPOSE_PATH"
+
+    # Limpiar configuraciones que no aplican para el worker
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".ports)' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".container_name)' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".labels)' "$N8N_COMPOSE_PATH"
@@ -118,7 +132,15 @@ fi
 # --- FASE 4: DESPLIEGUE DEL AUTOSCALER ---
 print_header "4. Desplegando el Servicio de Auto-Escalado"
 AUTOSCALER_DIR="n8n-autoscaler"; mkdir -p "$AUTOSCALER_DIR"; if [ -f "$N8N_ENV_PATH" ]; then echo "📋 Copiando '$N8N_ENV_PATH' a '$AUTOSCALER_DIR/.env'..."; cp "$N8N_ENV_PATH" "$AUTOSCALER_DIR/.env"; else touch "$AUTOSCALER_DIR/.env"; fi
-cd "$AUTOSCALER_DIR" || exit; echo -e "\nAhora, configuremos el comportamiento del auto-escalado:"; QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un nuevo worker" "15"); MAX_WORKERS=$(ask "Nº máximo de workers permitidos" "5"); MIN_WORKERS=$(ask "Nº mínimo de workers activos" "0"); IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un worker" "90"); POLL_INTERVAL=$(ask "Segundos entre cada verificación" "10"); TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" ""); TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
+cd "$AUTOSCALER_DIR" || exit
+echo -e "\nAhora, configuremos el comportamiento del auto-escalado:"
+QUEUE_THRESHOLD=$(ask "Nº de tareas en cola para crear un nuevo worker" "15")
+MAX_WORKERS=$(ask "Nº máximo de workers permitidos" "5")
+MIN_WORKERS=$(ask "Nº mínimo de workers activos" "0")
+IDLE_TIME_BEFORE_SCALE_DOWN=$(ask "Segundos de inactividad para destruir un worker" "90")
+POLL_INTERVAL=$(ask "Segundos entre cada verificación" "10")
+TELEGRAM_BOT_TOKEN=$(ask "Token de Bot de Telegram (opcional)" "")
+TELEGRAM_CHAT_ID=$(ask "Chat ID de Telegram (opcional)" "")
 cat >> .env << EOL
 
 # --- AUTOSCALER CONFIG - GENERATED BY SCRIPT ---
@@ -297,13 +319,18 @@ if __name__ == "__main__":
     notify(f"🤖 Autoscaler para *{N8N_PROJECT_NAME}* (re)iniciado.")
     main_loop()
 EOL
+
 # --- Despliegue Final ---
-echo "🧹 Limpiando instancias anteriores del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
-echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
+echo "🧹 Limpiando instancias anteriores del autoscaler..."
+docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
+echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."
+$COMPOSE_CMD_HOST up -d --build
 if [ $? -eq 0 ]; then
     print_header "🎉 ¡Instalación Completada con Éxito! 🎉"
     cd ..; echo -e "Tu stack de n8n ha sido configurado y el autoscaler está funcionando.\n\nPasos siguientes:\n  1. Revisa los logs: \033[0;32mdocker logs -f ${N8N_PROJECT_NAME}_autoscaler\033[0m\n  2. Configuración en: \033[0;32m./n8n-autoscaler/\033[0m"
 else
-    echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."; cd ..
+    echo -e "\n❌ Hubo un error durante el despliegue del autoscaler."
+    cd ..
 fi
-rm -f ./yq; echo -e "\nScript finalizado.\n"
+rm -f ./yq
+echo -e "\nScript finalizado.\n"
