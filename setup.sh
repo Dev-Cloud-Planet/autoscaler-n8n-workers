@@ -240,20 +240,23 @@ def main_loop():
                 time.sleep(POLL_INTERVAL * 2)
                 continue
             log(f"Estado: Cola={queue_size}, Workers={running_workers}, Umbral={QUEUE_THRESHOLD}")
-            if queue_size > QUEUE_THRESHOLD and running_workers < MAX_WORKERS:
-                scale(min(running_workers + 1, MAX_WORKERS))
+
+            desired_workers = min(max(queue_size, MIN_WORKERS), MAX_WORKERS)
+
+            if desired_workers != running_workers:
+                if desired_workers < running_workers:
+                    if idle_since is None:
+                        idle_since = time.time()
+                        log(f"Cola vacía o menor. Temporizador de {IDLE_TIME_BEFORE_SCALE_DOWN}s iniciado.")
+                    elif time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN:
+                        scale(desired_workers)
+                        idle_since = None
+                else:
+                    scale(desired_workers)
+                    idle_since = None
+            else:
                 idle_since = None
-            elif queue_size == 0 and running_workers > MIN_WORKERS:
-                if idle_since is None:
-                    idle_since = time.time()
-                    log(f"Cola vacía. Temporizador de {IDLE_TIME_BEFORE_SCALE_DOWN}s iniciado.")
-                if time.time() - idle_since >= IDLE_TIME_BEFORE_SCALE_DOWN:
-                    scale(max(running_workers - 1, MIN_WORKERS))
-                    idle_since = None
-            elif queue_size > 0:
-                if idle_since is not None:
-                    log("La cola ya no está vacía. Cancelando scale-down.")
-                    idle_since = None
+
             time.sleep(POLL_INTERVAL)
         except redis.exceptions.RedisError as e:
             log(f"⚠️ Redis Error: {e}. Reintentando...")
@@ -273,7 +276,7 @@ if __name__ == "__main__":
     N8N_WORKER_NAME = os.getenv('N8N_WORKER_SERVICE_NAME')
     REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
     QUEUE_KEY = "bull:jobs:wait"
-    QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 15))
+    QUEUE_THRESHOLD = int(os.getenv('QUEUE_THRESHOLD', 0))  # ya no se usa pero lo dejamos
     MAX_WORKERS = int(os.getenv('MAX_WORKERS', 5))
     MIN_WORKERS = int(os.getenv('MIN_WORKERS', 0))
     IDLE_TIME_BEFORE_SCALE_DOWN = int(os.getenv('IDLE_TIME_BEFORE_SCALE_DOWN', 90))
@@ -294,7 +297,6 @@ if __name__ == "__main__":
     notify(f"🤖 Autoscaler para *{N8N_PROJECT_NAME}* (re)iniciado.")
     main_loop()
 EOL
-
 # --- Despliegue Final ---
 echo "🧹 Limpiando instancias anteriores del autoscaler..."; docker rm -f "${N8N_PROJECT_NAME}_autoscaler" > /dev/null 2>&1
 echo "🏗️  Construyendo y desplegando el servicio de auto-escalado..."; $COMPOSE_CMD_HOST up -d --build
