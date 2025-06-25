@@ -1,5 +1,5 @@
 #!/bin/bash
-
+set -u
 # ==============================================================================
 #   Script de Instalación y Configuración del Auto-Escalado para n8n
 #
@@ -99,7 +99,7 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += ["EXECUTIONS_MODE=queue", "EXECUTIONS_PROCESS=main", "QUEUE_BULL_REDIS_HOST='$REDIS_HOST'", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true"]' "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_name'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
+    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".environment |= . - ["EXECUTIONS_PROCESS=main"]' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'".environment += ["EXECUTIONS_PROCESS=worker"]' "$N8N_COMPOSE_PATH"
