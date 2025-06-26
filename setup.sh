@@ -98,13 +98,28 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
 
-    $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".environment += [
-        "EXECUTIONS_MODE=queue",
-        "QUEUE_BULL_REDIS_HOST='$REDIS_HOST'",
-        "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true",
-        "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true",
-        "N8N_RUNNERS_ENABLED=false"
-    ]' "$N8N_COMPOSE_PATH"
+    for VAR in \
+        "EXECUTIONS_MODE=queue" \
+        "QUEUE_BULL_REDIS_HOST=$REDIS_HOST" \
+        "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true" \
+        "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true"; do
+        $YQ_CMD eval -i ".services.\"$N8N_MAIN_SERVICE_NAME\".environment |= map(select(. != \"$VAR\")) + [\"$VAR\"]" "$N8N_COMPOSE_PATH"
+        $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(select(. != \"$VAR\")) + [\"$VAR\"]" "$N8N_COMPOSE_PATH"
+    done
+
+    for VAR in \
+        "DB_TYPE=postgresdb" \
+        "DB_POSTGRESDB_HOST=postgres" \
+        "DB_POSTGRESDB_PORT=5432" \
+        "DB_POSTGRESDB_DATABASE=\${POSTGRES_DB}" \
+        "DB_POSTGRESDB_USER=\${POSTGRES_USER}" \
+        "DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}"; do
+        $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(select(. != \"$VAR\")) + [\"$VAR\"]" "$N8N_COMPOSE_PATH"
+    done
+
+    $YQ_CMD eval -i ".services.\"$N8N_MAIN_SERVICE_NAME\".environment |= map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")) | sub(\"^N8N_RUNNERS_ENABLED=.*\", \"N8N_RUNNERS_ENABLED=false\")) + (map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")).not) | . + [\"N8N_RUNNERS_ENABLED=false\"] | unique)" "$N8N_COMPOSE_PATH"
+
+    $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")) | sub(\"^N8N_RUNNERS_ENABLED=.*\", \"N8N_RUNNERS_ENABLED=true\")) + (map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")).not) | . + [\"N8N_RUNNERS_ENABLED=true\"] | unique)" "$N8N_COMPOSE_PATH"
 
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
