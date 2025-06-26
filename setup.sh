@@ -98,39 +98,44 @@ if [ -z "$IS_QUEUE_MODE" ]; then
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.timeout = "5s"' "$N8N_COMPOSE_PATH"
     $YQ_CMD eval -i '.services."'$REDIS_HOST'".healthcheck.retries = 5' "$N8N_COMPOSE_PATH"
 
-    # Variables para ambos servicios n8n y worker
+    # Añadir/actualizar variables de entorno en el servicio principal y worker
     for VAR in \
         "EXECUTIONS_MODE=queue" \
         "QUEUE_BULL_REDIS_HOST=$REDIS_HOST" \
         "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true" \
         "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true"; do
         $YQ_CMD eval -i ".services.\"$N8N_MAIN_SERVICE_NAME\".environment |= map(select(. != \"$VAR\")) + [\"$VAR\"]" "$N8N_COMPOSE_PATH"
-        $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(select(. != \"$VAR\")) + [\"$VAR\"]" "$N8N_COMPOSE_PATH"
     done
 
-    # Variables solo para worker (conexión a Postgres)
+    # Verificar si el servicio worker existe
+    WORKER_EXISTS=$($YQ_CMD eval "has(\"services.$N8N_WORKER_SERVICE_NAME\")" "$N8N_COMPOSE_PATH")
+    if [ "$WORKER_EXISTS" = "false" ]; then
+        echo "➕ Creando servicio worker basado en el servicio principal..."
+        $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\" = .services.\"$N8N_MAIN_SERVICE_NAME\"" "$N8N_COMPOSE_PATH"
+        $YQ_CMD eval -i "del(.services.\"$N8N_WORKER_SERVICE_NAME\".ports)" "$N8N_COMPOSE_PATH"
+        $YQ_CMD eval -i "del(.services.\"$N8N_WORKER_SERVICE_NAME\".container_name)" "$N8N_COMPOSE_PATH"
+        $YQ_CMD eval -i "del(.services.\"$N8N_WORKER_SERVICE_NAME\".labels)" "$N8N_COMPOSE_PATH"
+    else
+        echo "🔄 Servicio worker ya existe. Solo se actualizarán variables."
+    fi
+
+    # Variables solo para worker (Postgres y runner activado)
     for VAR in \
         "DB_TYPE=postgresdb" \
         "DB_POSTGRESDB_HOST=postgres" \
         "DB_POSTGRESDB_PORT=5432" \
         "DB_POSTGRESDB_DATABASE=\${POSTGRES_DB}" \
         "DB_POSTGRESDB_USER=\${POSTGRES_USER}" \
-        "DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}"; do
+        "DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}" \
+        "N8N_RUNNERS_ENABLED=true"; do
         $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(select(. != \"$VAR\")) + [\"$VAR\"]" "$N8N_COMPOSE_PATH"
     done
 
-    # Corregir N8N_RUNNERS_ENABLED duplicados
+    # Variables para el servicio principal (runner desactivado)
     $YQ_CMD eval -i ".services.\"$N8N_MAIN_SERVICE_NAME\".environment |= map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")) | sub(\"^N8N_RUNNERS_ENABLED=.*\", \"N8N_RUNNERS_ENABLED=false\")) + (map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")).not) | . + [\"N8N_RUNNERS_ENABLED=false\"] | unique)" "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i ".services.\"$N8N_WORKER_SERVICE_NAME\".environment |= map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")) | sub(\"^N8N_RUNNERS_ENABLED=.*\", \"N8N_RUNNERS_ENABLED=true\")) + (map(select(. | test(\"^N8N_RUNNERS_ENABLED=.*\")).not) | . + [\"N8N_RUNNERS_ENABLED=true\"] | unique)" "$N8N_COMPOSE_PATH"
 
     # Dependencia del main con Redis saludable
     $YQ_CMD eval -i '.services."'$N8N_MAIN_SERVICE_NAME'".depends_on."'$REDIS_HOST'".condition = "service_healthy"' "$N8N_COMPOSE_PATH"
-
-    # Clonar servicio worker desde main y eliminar campos no necesarios
-    $YQ_CMD eval -i '.services."'$N8N_WORKER_SERVICE_NAME'" = .services."'$N8N_MAIN_SERVICE_NAME'"' "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".ports)' "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".container_name)' "$N8N_COMPOSE_PATH"
-    $YQ_CMD eval -i 'del(.services."'$N8N_WORKER_SERVICE_NAME'".labels)' "$N8N_COMPOSE_PATH"
 
     if [ $? -ne 0 ]; then echo "❌ Error al modificar 'docker-compose.yml' con yq." && restore_and_exit; fi
 
